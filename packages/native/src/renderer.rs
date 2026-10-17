@@ -43,7 +43,7 @@ use crate::accessibility::{apply_a11y_click, apply_accessibility};
 use crate::custom_elements::{CustomElementRegistry, CustomRenderContext};
 use crate::element_tree::EventPayload;
 use crate::retained_tree::{RetainedTree, StyleTable};
-use crate::style::StyleDesc;
+use crate::style::{StyleDesc, WindowControlAreaStyle};
 use crate::text::{selectable_text, selection_frame_reset, SharedSelection};
 use crate::theme::Theme;
 
@@ -7481,6 +7481,14 @@ where
     E: gpui::Styled + gpui::StatefulInteractiveElement,
 {
     el = apply_styles(el, style);
+    if let Some(area) = style.window_control_area {
+        el = el.window_control_area(match area {
+            WindowControlAreaStyle::Drag => gpui::WindowControlArea::Drag,
+            WindowControlAreaStyle::Close => gpui::WindowControlArea::Close,
+            WindowControlAreaStyle::Max => gpui::WindowControlArea::Max,
+            WindowControlAreaStyle::Min => gpui::WindowControlArea::Min,
+        });
+    }
     if let Some(hover_style) = style.hover.as_deref() {
         el = el.hover(|refinement| apply_styles(refinement, hover_style));
     }

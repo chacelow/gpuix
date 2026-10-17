@@ -217,6 +217,8 @@ export interface StyleDesc {
    *  blocks. Unset blocks clicks when the element paints a fill or is
    *  positioned, but lets the wheel reach the ancestor scroller, like HTML. */
   pointerEvents?: "auto" | "none"
+  /** Native caption hitbox; interactive descendants should occlude drag regions. */
+  windowControlArea?: "drag" | "close" | "max" | "min"
 
   /** "none" opts this element and its subtree out of text selection.
    *  Inherited like the CSS property, so a toolbar can disable it once. */

@@ -143,6 +143,15 @@ impl<'de> Deserialize<'de> for DimensionValue {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WindowControlAreaStyle {
+    Drag,
+    Close,
+    Max,
+    Min,
+}
+
 /// Style description that can be serialized from JS
 /// Note: This is only used for JSON deserialization, not direct napi binding
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
@@ -254,6 +263,9 @@ pub struct StyleDesc {
     /// `"auto"` blocks mouse hits behind this element. `"none"` never does.
     /// Unset: block when this element paints a fill or is absolutely positioned.
     pub pointer_events: Option<String>,
+    /// Native caption hitbox, resolved after interactive descendants occlude it.
+    pub window_control_area: Option<WindowControlAreaStyle>,
+
 
     // Text selection. "none" opts an element and its subtree out of the
     // selection registry, so buttons and toolbars never start a drag.
@@ -406,6 +418,21 @@ mod tests {
             ..Default::default()
         }
     }
+
+    #[test]
+    fn window_control_area_accepts_native_caption_actions() {
+        for (name, expected) in [
+            ("drag", WindowControlAreaStyle::Drag),
+            ("close", WindowControlAreaStyle::Close),
+            ("max", WindowControlAreaStyle::Max),
+            ("min", WindowControlAreaStyle::Min),
+        ] {
+            let style: StyleDesc = serde_json::from_str(&format!(r#"{{"windowControlArea":"{name}"}}"#)).unwrap();
+            assert_eq!(style.window_control_area, Some(expected));
+        }
+        assert!(serde_json::from_str::<StyleDesc>(r#"{"windowControlArea":"unknown"}"#).is_err());
+    }
+
 
     #[test]
     fn transparent_function_does_not_occlude() {
