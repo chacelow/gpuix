@@ -1332,6 +1332,24 @@ mod windows_scale_tests {
     use super::*;
 
     #[test]
+    fn hover_events_include_the_window_pointer_position() {
+        let renderer = TestGpuixRenderer::new(Some(400.0), Some(300.0), None).unwrap();
+        renderer.apply_batch(
+            r#"[["createElement",1,"div"],["setStyle",1,{"width":100,"height":100}],["setEventListener",1,"mouseEnter",true],["setEventListener",1,"mouseLeave",true],["setRoot",1]]"#.to_string(),
+        ).unwrap();
+        renderer.flush().unwrap();
+        renderer.simulate_mouse_move(25.0, 35.0, None, None).unwrap();
+        renderer.flush().unwrap();
+        let enter = renderer.drain_events().into_iter().find(|event| event.event_type == "mouseEnter").unwrap();
+        assert_eq!((enter.x, enter.y, enter.hovered), (Some(25.0), Some(35.0), Some(true)));
+        renderer.simulate_mouse_move(150.0, 160.0, None, None).unwrap();
+        renderer.flush().unwrap();
+        let leave = renderer.drain_events().into_iter().find(|event| event.event_type == "mouseLeave").unwrap();
+        assert_eq!((leave.x, leave.y, leave.hovered), (Some(150.0), Some(160.0), Some(false)));
+        renderer.dispose();
+    }
+
+    #[test]
     fn real_offscreen_window_preserves_bounds_and_physical_capture_scale() {
         for (requested_scale, expected_scale) in [(None, 1.0), (Some(1.0), 1.0), (Some(2.0), 2.0)] {
             let renderer = TestGpuixRenderer::new(Some(400.0), Some(300.0), requested_scale).unwrap();

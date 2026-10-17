@@ -170,10 +170,13 @@ pub(crate) fn wire_standard_events<E: gpui::StatefulInteractiveElement>(
                     let enter = ctx.events.contains("mouseEnter");
                     let leave = ctx.events.contains("mouseLeave");
                     let callback = ctx.event_callback.clone();
-                    el = el.on_hover(move |&hovered, _window, _cx| {
+                    el = el.on_hover(move |&hovered, window, _cx| {
                         let kind = if hovered { "mouseEnter" } else { "mouseLeave" };
                         if (hovered && enter) || (!hovered && leave) {
                             crate::renderer::emit_event_full(&callback, id, kind, |p| {
+                                let position = window.mouse_position();
+                                p.x = Some(f64::from(position.x));
+                                p.y = Some(f64::from(position.y));
                                 p.hovered = Some(hovered);
                             });
                         }

@@ -7018,13 +7018,18 @@ pub(crate) fn build_host_container(
                     } else {
                         None
                     };
-                    el = el.on_hover(move |&is_hovered, _window, _cx| {
+                    el = el.on_hover(move |&is_hovered, window, _cx| {
+                        let (x, y) = point_to_xy(window.mouse_position());
                         if is_hovered {
                             emit_event_full(&callback_enter, id, "mouseEnter", |p| {
+                                p.x = Some(x);
+                                p.y = Some(y);
                                 p.hovered = Some(true);
                             });
                         } else {
                             emit_event_full(&callback_leave, id, "mouseLeave", |p| {
+                                p.x = Some(x);
+                                p.y = Some(y);
                                 p.hovered = Some(false);
                             });
                         }
