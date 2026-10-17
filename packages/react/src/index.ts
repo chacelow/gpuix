@@ -148,6 +148,8 @@ export type {
   PathPromptOptions,
   Props,
   PublicInstance,
+  QuadBatchInstance,
+  QuadBatchProps,
   StyleDesc,
   SvgProps,
   SelectionHost,

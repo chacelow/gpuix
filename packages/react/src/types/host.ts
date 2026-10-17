@@ -10,6 +10,7 @@ import type {
   TextareaProps as NativeTextareaProps,
   ImgProps as NativeImgProps,
   SvgProps as NativeSvgProps,
+  QuadBatchProps as NativeQuadBatchProps,
   CodeProps as NativeCodeProps,
   DiffProps as NativeDiffProps,
   MarkdownProps as NativeMarkdownProps,
@@ -50,6 +51,11 @@ export interface SvgProps extends NativeSvgProps {
   key?: Key | null
   children?: ReactNode
   ref?: Ref<PublicInstance>
+}
+
+export interface QuadBatchProps extends NativeQuadBatchProps {
+  key?: Key | null
+  ref?: Ref<QuadBatchInstance>
 }
 
 export interface CodeProps extends NativeCodeProps {
@@ -105,6 +111,11 @@ export interface Instance {
   type: ElementType
   props: Props
   scrollIntoView?(): void
+}
+
+export interface QuadBatchInstance extends Instance {
+  type: "quad-batch"
+  setQuads(quads: Float32Array): void
 }
 
 export interface ImgInstance extends Instance {

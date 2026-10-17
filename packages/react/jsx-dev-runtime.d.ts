@@ -12,6 +12,7 @@ import type {
   InputProps,
   MarkdownProps,
   Props,
+  QuadBatchProps,
   SvgProps,
   TextareaProps,
   VirtualListProps,
@@ -34,6 +35,7 @@ export namespace JSX {
     img: ImgProps
     svg: SvgProps
     canvas: Props
+    "quad-batch": QuadBatchProps
     input: InputProps
     textarea: TextareaProps
     anchored: AnchoredProps

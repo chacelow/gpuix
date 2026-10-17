@@ -35,6 +35,7 @@ export const gpuixComponents = {
   img: "img",
   svg: "svg",
   canvas: "canvas",
+  "quad-batch": "quad-batch",
   input: "input",
   textarea: "textarea",
   anchored: "anchored",

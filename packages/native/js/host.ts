@@ -248,6 +248,7 @@ export type ElementType =
   | "img"
   | "svg"
   | "canvas"
+  | "quad-batch"
   | "input"
   | "textarea"
   | "anchored"
@@ -593,6 +594,16 @@ export interface SvgProps extends HostProps {
   source?: string
 }
 
+/** Visual-only host; upload geometry through its imperative setQuads handle. */
+export interface QuadBatchProps {
+  style?: StyleDesc
+  testId?: string
+  /** Logical pixels; finite and nonnegative. Defaults to zero. */
+  strokeWidth?: number
+  /** Renderer-supported color; defaults to transparent. */
+  strokeColor?: string
+}
+
 /**
  * Props for the <code> custom element — a syntax-highlighted code block.
  *
@@ -708,6 +719,7 @@ export type NativeRenderer = MutationHost &
       | "scrollIntoView"
       | "setImage"
       | "setImagePixels"
+      | "setQuads"
       | "getScrollOffset"
       | "getListScrollTop"
       | "getSelectedText"

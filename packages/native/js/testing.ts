@@ -34,6 +34,7 @@ export type { MacCpuThrottle } from "./cpu-throttle.js"
 
 interface NativeTestRendererApi extends NativeRenderer {
   promptForPaths(options?: PathPromptOptions): Promise<string[] | null>
+  setQuads(elementId: number, quads: Float32Array): void
   flush(): void
   drainEvents(): EventPayload[]
   simulateKeystrokes(keystrokes: string): void
@@ -175,6 +176,7 @@ export class TestRenderer implements NativeRenderer {
   /** Native TestGpuixRenderer — all state lives here in Rust's RetainedTree. */
   private native: NativeTestRendererApi
   readonly applyBatch: NativeRenderer["applyBatch"]
+  readonly setQuads: NonNullable<NativeRenderer["setQuads"]>
   readonly focusNext: () => void
   readonly focusPrevious: () => void
   readonly promptForPaths: NonNullable<NativeRenderer["promptForPaths"]>
@@ -192,6 +194,7 @@ export class TestRenderer implements NativeRenderer {
     }
     this.native = new NativeTestRenderer(options.width, options.height)
     this.applyBatch = this.native.applyBatch.bind(this.native)
+    this.setQuads = this.native.setQuads.bind(this.native)
     this.focusNext = this.native.focusNext.bind(this.native)
     this.focusPrevious = this.native.focusPrevious.bind(this.native)
     this.promptForPaths = this.native.promptForPaths.bind(this.native)

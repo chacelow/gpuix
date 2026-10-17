@@ -59,6 +59,16 @@ function attachHostMethods(instance: Instance): void {
   instance.scrollIntoView = () => {
     container.nativeRenderer.scrollIntoView?.(instance.id)
   }
+  if (instance.type === "quad-batch") {
+    Object.assign(instance, {
+      setQuads(quads: Float32Array) {
+        const upload = container.nativeRenderer.setQuads
+        if (!upload) throw new Error("Renderer does not support quad batches")
+        upload.call(container.nativeRenderer, instance.id, quads)
+      },
+    })
+    return
+  }
   if (instance.type !== "img") return
   const img = instance as ImgInstance
   img.setImage = (bytes) => {

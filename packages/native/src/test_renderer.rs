@@ -305,6 +305,20 @@ impl TestGpuixRenderer {
         apply_batch_to_tree(&mut tree, json.as_bytes()).map_err(Error::from_reason)
     }
 
+    #[napi]
+    pub fn set_quads(
+        &self,
+        element_id: f64,
+        quads: napi::bindgen_prelude::Float32Array,
+    ) -> Result<()> {
+        let id = crate::renderer::to_element_id(element_id)?;
+        self.tree
+            .lock()
+            .unwrap()
+            .set_quads(id, &quads)
+            .map_err(Error::from_reason)
+    }
+
     // ── Test-specific methods ────────────────────────────────────────
 
     /// Notify the view entity and run GPUI until parked.

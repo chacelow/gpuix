@@ -1700,6 +1700,22 @@ impl GpuixRenderer {
         Ok(destroyed)
     }
 
+    /// Replace local x/y/width/height rectangles with one copy from JavaScript.
+    #[napi]
+    pub fn set_quads(
+        &self,
+        element_id: f64,
+        quads: napi::bindgen_prelude::Float32Array,
+    ) -> Result<()> {
+        let id = to_element_id(element_id)?;
+        self.tree
+            .lock()
+            .unwrap()
+            .set_quads(id, &quads)
+            .map_err(Error::from_reason)?;
+        self.request_invalidate()
+    }
+
     // ── Frame loop ───────────────────────────────────────────────────
 
     /// Pump the native event loop. Returns false after the last window closes.
@@ -5674,6 +5690,10 @@ pub(crate) fn build_element(
             ctx.custom_registry.destroy(id);
             build_host_container(element, style, ctx, window, cx)
         }
+        "quad-batch" => {
+            ctx.custom_registry.destroy(id);
+            crate::quad_batch::render(element, style).into_any_element()
+        }
         "virtual-list" => {
             ctx.custom_registry.destroy(id);
             build_virtual_list(element, ctx, window, cx)
@@ -7494,6 +7514,29 @@ fn resolve_styles(
 pub fn apply_batch_to_tree(tree: &mut RetainedTree, bytes: &[u8]) -> BatchResult<Vec<f64>> {
     // Phase 1: decode. No mutation.
     let parsed = parse_batch_ops(bytes)?;
+    if parsed.iter().any(|op| matches!(op, BatchOp::SetCustomProp { key, .. }
+        if key == "strokeWidth" || key == "strokeColor")) {
+        let mut created_types = std::collections::HashMap::new();
+        for op in &parsed {
+            match op {
+                BatchOp::CreateElement { id, element_type } => {
+                    created_types.insert(*id, element_type.as_str() == "quad-batch");
+                }
+                BatchOp::DestroyElement { id } => {
+                    created_types.insert(*id, false);
+                }
+                BatchOp::SetCustomProp { id, key, value } => {
+                    let is_quad = created_types.get(id).copied().unwrap_or_else(|| {
+                        tree.elements.get(id).is_some_and(|element| element.element_type == "quad-batch")
+                    });
+                    if is_quad {
+                        crate::quad_batch::validate_paint_prop(key, value)?;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
 
     // Phase 2: resolve styles. Touches the style table only; a failure here
     // sweeps back out whatever this call interned.

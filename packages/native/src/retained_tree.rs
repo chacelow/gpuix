@@ -62,11 +62,16 @@ pub struct RetainedElement {
 struct ElementExtras {
     events: HashSet<String>,
     custom_props: HashMap<String, serde_json::Value>,
+    quads: Option<Arc<[f32]>>,
 }
 
 static EMPTY_EXTRAS: LazyLock<ElementExtras> = LazyLock::new(ElementExtras::default);
 
 impl RetainedElement {
+    pub(crate) fn quads(&self) -> Option<Arc<[f32]>> {
+        self.extras.as_deref().and_then(|extras| extras.quads.clone())
+    }
+
     /// The element's `tabIndex`, when it has a usable one.
     pub fn tab_index(&self) -> Option<isize> {
         self.custom_props()
@@ -78,6 +83,9 @@ impl RetainedElement {
     /// Whether the element must own a gpui focus handle: it takes text, is in the
     /// tab order, or listens for a key or focus event.
     pub fn needs_focus(&self) -> bool {
+        if self.element_type == "quad-batch" {
+            return false;
+        }
         matches!(self.element_type.as_str(), "input" | "textarea")
             || self.tab_index().is_some()
             || self.events().contains("keyDown")
@@ -118,7 +126,9 @@ impl RetainedElement {
         if self
             .extras
             .as_ref()
-            .is_some_and(|extras| extras.events.is_empty() && extras.custom_props.is_empty())
+            .is_some_and(|extras| {
+                extras.events.is_empty() && extras.custom_props.is_empty() && extras.quads.is_none()
+            })
         {
             self.extras = None;
         }
@@ -468,6 +478,20 @@ impl RetainedTree {
         }
     }
 
+    pub(crate) fn set_quads(&mut self, id: u64, values: &[f32]) -> Result<(), String> {
+        crate::quad_batch::validate(values)?;
+        let element = self
+            .elements
+            .get_mut(&id)
+            .ok_or_else(|| format!("Unknown element id {id}"))?;
+        if element.element_type != "quad-batch" {
+            return Err("setQuads requires a <quad-batch> element".into());
+        }
+        element.extras_mut().quads = Some(Arc::from(values));
+        self.mark_render_changed(id);
+        Ok(())
+    }
+
     pub fn set_text(&mut self, id: u64, content: String) {
         let mut changed = false;
         if let Some(element) = self.elements.get_mut(&id) {
@@ -646,6 +670,9 @@ impl RetainedTree {
         let Some(element) = self.elements.get(&id) else {
             return;
         };
+        if element.element_type == "quad-batch" {
+            return;
+        }
         let style = element.style.as_deref();
         let own_box = (walk.painted_box)(id);
         let (x, y) = (walk.x, walk.y);
