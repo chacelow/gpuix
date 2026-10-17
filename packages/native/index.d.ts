@@ -107,6 +107,13 @@ export declare class GpuixRenderer {
    */
   setAnimationFrameActive(active: boolean): void
   /**
+   * Runs synchronously before the first restored frame is painted. Retained
+   * batch setters (applyBatch and setQuads) may update data in this callback;
+   * GPUI reads and window updates cannot reenter the borrowed App context.
+   * Registration samples a baseline rather than emitting an initial resume.
+   */
+  setResumeFrameCallback(callback: ((timestampMs: number) => void) | null): void
+  /**
    * Subscribe to native window activation. The first asynchronous callback
    * reports current state; later callbacks report activation changes.
    * Passing null drops the GPUI observer. Already queued callbacks may drain.

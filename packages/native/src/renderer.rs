@@ -25,6 +25,8 @@ use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi::JsDeferred;
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 use napi_derive::napi;
+#[cfg(target_os = "macos")]
+use objc::{sel, sel_impl};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -116,6 +118,169 @@ fn schedule_animation_frame(window: &gpui::Window) {
     });
 }
 
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResumeVisibility {
+    // A key-window prepaint may precede AppKit's occlusion-visible notification.
+    Occluded,
+    BecomingVisible,
+    Visible,
+}
+
+#[cfg(target_os = "macos")]
+struct ResumeFrameState {
+    callback: Option<Rc<dyn Fn(f64)>>,
+    window: Option<objc::rc::StrongPtr>,
+    visibility: ResumeVisibility,
+    last_active: bool,
+    pending: bool,
+    scheduled: bool,
+    dispatching: bool,
+    invalidated: bool,
+}
+
+#[cfg(target_os = "macos")]
+impl Default for ResumeFrameState {
+    fn default() -> Self {
+        Self {
+            callback: None,
+            window: None,
+            visibility: ResumeVisibility::Occluded,
+            last_active: false,
+            pending: false,
+            scheduled: false,
+            dispatching: false,
+            invalidated: false,
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl ResumeFrameState {
+    fn observe(&mut self, visible: bool, active: bool) {
+        let shown = visible && self.visibility == ResumeVisibility::Occluded;
+        if self.callback.is_some() && (shown || (active && !self.last_active)) {
+            self.pending = true;
+        }
+        self.visibility = if visible {
+            ResumeVisibility::Visible
+        } else if active && self.visibility == ResumeVisibility::BecomingVisible {
+            ResumeVisibility::BecomingVisible
+        } else {
+            ResumeVisibility::Occluded
+        };
+        self.last_active = active;
+    }
+
+    fn take_resume(&mut self) -> Option<Rc<dyn Fn(f64)>> {
+        if !self.pending || (!self.last_active && self.visibility != ResumeVisibility::Visible) {
+            return None;
+        }
+        let callback = self.callback.clone()?;
+        self.pending = false;
+        if self.visibility == ResumeVisibility::Occluded {
+            self.visibility = ResumeVisibility::BecomingVisible;
+        }
+        self.dispatching = true;
+        Some(callback)
+    }
+
+    fn finish_resume(&mut self) -> bool {
+        self.dispatching = false;
+        std::mem::take(&mut self.invalidated)
+    }
+
+    fn sample(&mut self) {
+        use cocoa::appkit::{NSWindow, NSWindowOcclusionState};
+        use cocoa::base::YES;
+
+        let Some(native_window) = self.window.as_ref() else { return };
+        let native_window = **native_window as cocoa::base::id;
+        let visible = unsafe {
+            let minimized: cocoa::base::BOOL = objc::msg_send![native_window, isMiniaturized];
+            minimized != YES
+                && native_window.isVisible() == YES
+                && native_window.occlusionState().contains(
+                    NSWindowOcclusionState::NSWindowOcclusionStateVisible,
+                )
+        };
+        let active = unsafe { native_window.isKeyWindow() == YES };
+        self.observe(visible, active);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn reject_during_resume() -> Result<()> {
+    if RESUME_FRAME.with(|stored| stored.borrow().dispatching) {
+        Err(Error::from_reason(
+            "Native GPUI reads and updates are unavailable during a resume frame callback; retained batch setters (applyBatch, setQuads) and state-only callback registration are allowed",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn sample_resume_frame() {
+    RESUME_FRAME.with(|stored| {
+        let mut state = stored.borrow_mut();
+        if state.callback.is_some() {
+            state.sample();
+        }
+    });
+}
+
+#[cfg(target_os = "macos")]
+fn schedule_resume_frame(window: &gpui::Window) {
+    let should_schedule = RESUME_FRAME.with(|stored| {
+        let mut state = stored.borrow_mut();
+        if state.callback.is_none() || state.scheduled { return false; }
+        state.scheduled = true;
+        true
+    });
+    if !should_schedule { return; }
+    window.on_next_frame(|window, cx| {
+        let dispatch = RESUME_FRAME.with(|stored| {
+            let mut state = stored.borrow_mut();
+            state.scheduled = false;
+            state.sample();
+            state.take_resume().map(|callback| {
+                (callback, ANIMATION_FRAME.with(|frame| frame.borrow().origin.elapsed().as_secs_f64() * 1000.0))
+            })
+        });
+        let resumed = dispatch.is_some();
+        if let Some((callback, timestamp_ms)) = dispatch {
+            callback(timestamp_ms);
+            let invalidated = RESUME_FRAME.with(|stored| stored.borrow_mut().finish_resume());
+            if invalidated {
+                if let Some(root) = window.root::<GpuixView>().flatten() {
+                    cx.notify(root.entity_id());
+                }
+                window.refresh();
+            }
+        }
+        if resumed && ANIMATION_FRAME.with(|stored| {
+            let state = stored.borrow();
+            state.active && state.callback.is_some()
+        }) {
+            schedule_animation_frame(window);
+        }
+        if RESUME_FRAME.with(|stored| stored.borrow().callback.is_some()) {
+            schedule_resume_frame(window);
+        }
+    });
+}
+
+#[cfg(target_os = "macos")]
+fn observe_resume_window_close(cx: &mut gpui::App, window_id: gpui::WindowId) {
+    cx.on_window_closed(move |_cx, closed_id| {
+        if closed_id == window_id {
+            RESUME_FRAME.with(|stored| *stored.borrow_mut() = ResumeFrameState::default());
+            GPUI_WINDOW.with(|stored| *stored.borrow_mut() = None);
+        }
+    }).detach();
+}
+
 #[cfg(all(test, target_os = "macos"))]
 mod animation_frame_tests {
     use super::*;
@@ -164,6 +329,235 @@ mod animation_frame_tests {
                 assert_eq!(window.simulate_next_frame(cx), 0);
             })
             .unwrap();
+    }
+
+    #[gpui::test]
+    fn inactive_visible_window_continues_animation_callbacks(cx: &mut gpui::TestAppContext) {
+        let window = cx.add_window(|_, _| FrameView);
+        let calls = Rc::new(Cell::new(0));
+        ANIMATION_FRAME.with(|stored| {
+            let calls = calls.clone();
+            *stored.borrow_mut() = AnimationFrameState {
+                callback: Some(Rc::new(move |_| calls.set(calls.get() + 1))),
+                active: true,
+                pending: false,
+                origin: std::time::Instant::now(),
+            };
+        });
+        window.update(cx, |_, window, cx| {
+            window.set_active_for_tests(false, cx);
+            assert!(!window.is_window_active());
+            schedule_animation_frame(window);
+            for expected in 1..=3 {
+                assert_eq!(window.simulate_next_frame(cx), 1);
+                assert_eq!(calls.get(), expected);
+            }
+            ANIMATION_FRAME.with(|stored| stored.borrow_mut().active = false);
+            assert_eq!(window.simulate_next_frame(cx), 1);
+            assert_eq!(window.simulate_next_frame(cx), 0);
+            assert_eq!(calls.get(), 3);
+        }).unwrap();
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod resume_frame_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[gpui::test]
+    fn first_restored_frame_paints_synchronous_retained_commit(cx: &mut gpui::TestAppContext) {
+        let renderer = Rc::new(GpuixRenderer::new(None));
+        {
+            let mut tree = renderer.tree.lock().unwrap();
+            apply_batch_to_tree(&mut tree, br#"[["createElement",1,"div"],["createElement",2,"text"],["appendChild",1,2],["setText",2,"stale"],["setRoot",1]]"#).unwrap();
+            tree.take_dirty();
+        }
+        let window = cx.add_window(|_, _| GpuixView::new(
+            renderer.tree.clone(), None, "resume frame".into(), SharedSelection::default(),
+        ));
+        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx)).unwrap();
+        assert!(crate::text::painted_text().contains(&"stale".to_string()));
+
+        let calls = Rc::new(Cell::new(0));
+        RESUME_FRAME.with(|stored| {
+            let renderer = renderer.clone();
+            let calls = calls.clone();
+            let mut state = stored.borrow_mut();
+            *state = ResumeFrameState::default();
+            state.observe(false, false);
+            state.callback = Some(Rc::new(move |_| {
+                calls.set(calls.get() + 1);
+                assert!(reject_during_resume().is_err());
+                assert!(update_window_without_view(|_, _| ()).is_err());
+                assert!(renderer.get_window_size().err().expect("window size read must fail during resume").reason.contains("resume frame callback"));
+                assert!(renderer.get_scroll_offset(1.0).err().expect("scroll read must fail during resume").reason.contains("resume frame callback"));
+                assert!(renderer.get_all_text().err().expect("text read must fail during resume").reason.contains("resume frame callback"));
+                renderer.apply_batch(r#"[["setText",2,"fresh"]]"#.to_string()).unwrap();
+                RESUME_FRAME.with(|stored| stored.borrow_mut().callback = None);
+            }));
+            assert!(!state.pending, "registration does not emit an initial resume");
+            state.observe(false, true);
+            assert!(state.pending);
+        });
+        cx.update_window(window.into(), |_, window, cx| {
+            schedule_resume_frame(window);
+            assert_eq!(window.simulate_next_frame(cx), 1);
+            window.draw(cx).clear(cx);
+        }).unwrap();
+        assert!(crate::text::painted_text().contains(&"fresh".to_string()));
+        assert!(!crate::text::painted_text().contains(&"stale".to_string()));
+        assert_eq!(calls.get(), 1);
+        RESUME_FRAME.with(|stored| *stored.borrow_mut() = ResumeFrameState::default());
+    }
+
+    #[gpui::test]
+    fn resumed_commit_is_visible_through_dirty_gated_gpui_redraws(cx: &mut gpui::TestAppContext) {
+        let mut renderer = GpuixRenderer::new(None);
+        {
+            let tree = Arc::get_mut(&mut renderer.tree)
+                .expect("new renderer owns its unshared tree")
+                .get_mut()
+                .expect("new renderer tree cannot be poisoned");
+            apply_batch_to_tree(tree, br#"[["createElement",1,"div"],["createElement",2,"text"],["appendChild",1,2],["setText",2,"stale"],["setRoot",1]]"#).unwrap();
+            tree.take_dirty();
+        }
+        let renderer = Rc::new(renderer);
+        let window = cx.add_window(|_, _| GpuixView::new(
+            renderer.tree.clone(), None, "dirty-gated resume".into(), SharedSelection::default(),
+        ));
+        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx)).unwrap();
+        RESUME_FRAME.with(|stored| {
+            let renderer = renderer.clone();
+            let mut state = stored.borrow_mut();
+            *state = ResumeFrameState::default();
+            state.observe(false, false);
+            state.callback = Some(Rc::new(move |_| {
+                renderer.apply_batch(r#"[["setText",2,"fresh"]]"#.to_string()).unwrap();
+                RESUME_FRAME.with(|stored| stored.borrow_mut().callback = None);
+            }));
+            state.observe(true, false);
+        });
+        let scenes = cx.update_window(window.into(), |_, window, cx| {
+            schedule_resume_frame(window);
+            assert_eq!(window.simulate_next_frame(cx), 1);
+            let mut scenes = Vec::new();
+            for _ in 0..2 {
+                // KeyUp preserves modality and uses GPUI's real dirty-gated draw path.
+                // Do not force a draw here: doing so masks a missing invalidation.
+                window.dispatch_event(gpui::PlatformInput::KeyUp(gpui::KeyUpEvent {
+                    keystroke: gpui::Keystroke::parse("f24").unwrap(),
+                }), cx);
+                scenes.push(crate::text::painted_text());
+            }
+            scenes
+        }).unwrap();
+        assert!(scenes[1].iter().any(|text| text == "fresh"), "second GPUI redraw still has old scene: {scenes:?}");
+        assert!(scenes[0].iter().any(|text| text == "fresh"));
+        assert!(scenes.iter().flatten().all(|text| text != "stale"));
+        RESUME_FRAME.with(|stored| *stored.borrow_mut() = ResumeFrameState::default());
+    }
+
+    #[gpui::test]
+    fn resume_quad_upload_is_retained_only_and_paints_new_geometry(cx: &mut gpui::TestAppContext) {
+        let mut renderer = GpuixRenderer::new(None);
+        {
+            let tree = Arc::get_mut(&mut renderer.tree)
+                .expect("new renderer owns its unshared tree")
+                .get_mut()
+                .expect("new renderer tree cannot be poisoned");
+            apply_batch_to_tree(tree, br#"[["createElement",1,"quad-batch"],["setStyle",1,{"width":100,"height":100}],["setRoot",1]]"#).unwrap();
+            tree.set_quads(1, &[0.0, 0.0, 8.0, 12.0]).unwrap();
+            tree.take_dirty();
+        }
+        let renderer = Rc::new(renderer);
+        let window = cx.add_window(|_, _| GpuixView::new(
+            renderer.tree.clone(), None, "quad resume".into(), SharedSelection::default(),
+        ));
+        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx)).unwrap();
+        RESUME_FRAME.with(|stored| {
+            let renderer = renderer.clone();
+            let mut state = stored.borrow_mut();
+            *state = ResumeFrameState::default();
+            state.observe(false, false);
+            state.callback = Some(Rc::new(move |_| {
+                renderer.set_quads(1.0, napi::bindgen_prelude::Float32Array::new(
+                    vec![4.0, 6.0, 32.0, 20.0],
+                )).unwrap();
+                RESUME_FRAME.with(|stored| stored.borrow_mut().callback = None);
+            }));
+            state.observe(true, false);
+        });
+        cx.update_window(window.into(), |_, window, cx| {
+            schedule_resume_frame(window);
+            assert_eq!(window.simulate_next_frame(cx), 1);
+            window.dispatch_event(gpui::PlatformInput::KeyUp(gpui::KeyUpEvent {
+                keystroke: gpui::Keystroke::parse("f24").unwrap(),
+            }), cx);
+            let quads = window.painted_quads();
+            assert_eq!(quads.len(), 1);
+            let scale = window.scale_factor();
+            assert_eq!(quads[0].bounds.origin.x.as_f32() / scale, 4.0);
+            assert_eq!(quads[0].bounds.origin.y.as_f32() / scale, 6.0);
+            assert_eq!(quads[0].bounds.size.width.as_f32() / scale, 32.0);
+            assert_eq!(quads[0].bounds.size.height.as_f32() / scale, 20.0);
+        }).unwrap();
+        RESUME_FRAME.with(|stored| *stored.borrow_mut() = ResumeFrameState::default());
+    }
+
+    #[gpui::test]
+    fn resumed_window_tracks_visibility_and_key_transitions_without_initial_event(
+        _cx: &mut gpui::TestAppContext,
+    ) {
+        let mut state = ResumeFrameState::default();
+        state.observe(true, true);
+        state.callback = Some(Rc::new(|_| {}));
+        assert!(!state.pending);
+        state.observe(true, false);
+        assert!(!state.pending);
+        state.observe(true, true);
+        assert!(state.take_resume().is_some());
+        state.finish_resume();
+        state.observe(false, false);
+        state.observe(false, true);
+        assert!(state.take_resume().is_some(), "key prepaint cannot wait for occlusion visibility");
+        state.finish_resume();
+        state.observe(false, true);
+        assert!(state.take_resume().is_none());
+        state.observe(true, true);
+        assert!(state.take_resume().is_none(), "the following visibility notification is the same restore");
+        state.observe(false, true);
+        state.observe(true, true);
+        assert!(state.take_resume().is_some(), "later pure occlusion recovery still resumes");
+        state.finish_resume();
+        state.observe(false, false);
+        state.observe(true, false);
+        assert!(state.take_resume().is_some(), "inactive visible windows resume too");
+        state.finish_resume();
+        state.callback = None;
+        state.observe(false, false);
+        state.observe(true, true);
+        assert!(!state.pending, "unsubscribed windows have no resume demand");
+    }
+
+    #[gpui::test]
+    fn no_resume_work_survives_window_close(cx: &mut gpui::TestAppContext) {
+        let window = cx.add_window(|_, _| GpuixView::new(
+            Arc::new(Mutex::new(RetainedTree::new())), None,
+            "close regression".into(), SharedSelection::default(),
+        ));
+        RESUME_FRAME.with(|stored| {
+            let mut state = stored.borrow_mut();
+            *state = ResumeFrameState::default();
+            state.callback = Some(Rc::new(|_| panic!("closed window resumed")));
+        });
+        cx.update(|cx| observe_resume_window_close(cx, window.window_id()));
+        window.update(cx, |_, window, _| schedule_resume_frame(window)).unwrap();
+        window.update(cx, |_, window, _| window.remove_window()).unwrap();
+        sample_resume_frame();
+        assert!(RESUME_FRAME.with(|stored| stored.borrow().window.is_none()));
+        assert!(RESUME_FRAME.with(|stored| stored.borrow().callback.is_none()));
+        assert!(!RESUME_FRAME.with(|stored| stored.borrow().scheduled));
     }
 }
 
@@ -380,6 +774,8 @@ thread_local! {
         pending: false,
         origin: std::time::Instant::now(),
     });
+    #[cfg(target_os = "macos")]
+    static RESUME_FRAME: RefCell<ResumeFrameState> = RefCell::new(ResumeFrameState::default());
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     static WEB_APP: RefCell<Option<gpui::ApplicationHandle>> = const { RefCell::new(None) };
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
@@ -544,6 +940,7 @@ fn recv_ui_response<T>(receiver: std::sync::mpsc::Receiver<T>, operation: &str) 
 fn update_window<R>(
     update: impl FnOnce(&mut GpuixView, &mut gpui::Window, &mut gpui::Context<GpuixView>) -> R,
 ) -> Result<R> {
+    reject_during_resume()?;
     let window = GPUI_WINDOW
         .with(|window| *window.borrow())
         .ok_or_else(|| Error::from_reason("GPUI window is not initialized"))?;
@@ -566,6 +963,7 @@ fn update_window<R>(
 fn update_window_without_view<R>(
     update: impl FnOnce(&mut gpui::Window, &mut gpui::App) -> R,
 ) -> Result<R> {
+    reject_during_resume()?;
     let window = GPUI_WINDOW
         .with(|window| *window.borrow())
         .ok_or_else(|| Error::from_reason("GPUI window is not initialized"))?;
@@ -585,6 +983,10 @@ fn update_window_without_view<R>(
 
 #[cfg(target_os = "macos")]
 fn invalidate_window() -> Result<()> {
+    if RESUME_FRAME.with(|stored| stored.borrow().dispatching) {
+        RESUME_FRAME.with(|stored| stored.borrow_mut().invalidated = true);
+        return Ok(());
+    }
     update_window(|_view, window, cx| {
         cx.notify();
         window.refresh();
@@ -1219,6 +1621,11 @@ impl GpuixRenderer {
 
     fn begin_path_prompt(&self, options: gpui::PathPromptOptions, deferred: PathPromptDeferred) {
         #[cfg(target_os = "macos")]
+        if let Err(error) = reject_during_resume() {
+            deferred.reject(error);
+            return;
+        }
+        #[cfg(target_os = "macos")]
         {
             let prompt = GPUI_APP.with(|app| {
                 let app = app.borrow();
@@ -1296,6 +1703,8 @@ impl GpuixRenderer {
 
     fn automation_bounds(&self) -> Result<HashMap<u64, crate::automation::ElementBounds>> {
         #[cfg(target_os = "macos")]
+        reject_during_resume()?;
+        #[cfg(target_os = "macos")]
         return Ok(crate::automation::all_bounds());
 
         #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
@@ -1315,6 +1724,8 @@ impl GpuixRenderer {
     }
 
     fn elements_at(&self, x: f64, y: f64) -> Result<Vec<u64>> {
+        #[cfg(target_os = "macos")]
+        reject_during_resume()?;
         #[cfg(target_os = "macos")]
         {
             let tree = self.tree.lock().unwrap();
@@ -1341,6 +1752,8 @@ impl GpuixRenderer {
     }
 
     fn element_bounds(&self, id: u64) -> Result<Option<crate::automation::ElementBounds>> {
+        #[cfg(target_os = "macos")]
+        reject_during_resume()?;
         #[cfg(target_os = "macos")]
         return Ok(crate::automation::get_bounds(id));
 
@@ -1406,6 +1819,8 @@ impl GpuixRenderer {
     /// Initialize GPUI using the native event-loop architecture for this OS.
     #[napi]
     pub fn init(&self, options: Option<WindowOptions>) -> Result<()> {
+        #[cfg(target_os = "macos")]
+        reject_during_resume()?;
         #[cfg(not(any(
             target_os = "macos",
             target_os = "windows",
@@ -1518,6 +1933,32 @@ impl GpuixRenderer {
                 return Err(error);
             }
         };
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        let native_window = app_handle
+            .update(|cx| {
+                window_handle.update(cx, |_, window, _| {
+                    let handle = HasWindowHandle::window_handle(window).map_err(|error| error.to_string())?;
+                    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+                        return Err("GPUI window does not expose an AppKit view".to_string());
+                    };
+                    // GPUI owns this NSView. Retain its exact NSWindow while the
+                    // view is live; the close observer releases this reference.
+                    let native_view = handle.ns_view.as_ptr() as cocoa::base::id;
+                    let native_window: cocoa::base::id = unsafe { objc::msg_send![native_view, window] };
+                    if native_window.is_null() {
+                        return Err("GPUI AppKit view has no window".to_string());
+                    }
+                    Ok(unsafe { objc::rc::StrongPtr::retain(native_window) })
+                })
+            })
+            .map_err(|error| Error::from_reason(error.to_string()))?
+            .map_err(Error::from_reason)?;
+        RESUME_FRAME.with(|stored| {
+            let mut state = stored.borrow_mut();
+            state.window = Some(native_window);
+            state.sample();
+        });
+        app_handle.update(|cx| observe_resume_window_close(cx, window_handle.window_id()));
 
         MAC_PLATFORM.with(|stored| {
             *stored.borrow_mut() = Some(platform);
@@ -1725,6 +2166,8 @@ impl GpuixRenderer {
     /// Pump the native event loop. Returns false after the last window closes.
     #[napi]
     pub fn tick(&self) -> Result<bool> {
+        #[cfg(target_os = "macos")]
+        reject_during_resume()?;
         let initialized = *self.initialized.lock().unwrap();
         if !initialized {
             return Err(Error::from_reason(
@@ -1734,12 +2177,19 @@ impl GpuixRenderer {
 
         #[cfg(target_os = "macos")]
         {
+            sample_resume_frame();
             let running = MAC_PLATFORM.with(|p| {
                 p.borrow()
                     .as_ref()
                     .map(|platform| platform.pump_events())
                     .unwrap_or(false)
             });
+            if running {
+                sample_resume_frame();
+            } else {
+                RESUME_FRAME.with(|stored| *stored.borrow_mut() = ResumeFrameState::default());
+                GPUI_WINDOW.with(|stored| *stored.borrow_mut() = None);
+            }
             return Ok(running);
         }
 
@@ -2000,6 +2450,9 @@ impl GpuixRenderer {
             Either::B(_) => None,
         };
         ANIMATION_FRAME.with(|stored| stored.borrow_mut().callback = handler);
+        if RESUME_FRAME.with(|stored| stored.borrow().dispatching) {
+            return Ok(());
+        }
         update_window_without_view(|window, _cx| schedule_animation_frame(window))
     }
 
@@ -2009,10 +2462,59 @@ impl GpuixRenderer {
     #[napi]
     pub fn set_animation_frame_active(&self, active: bool) -> Result<()> {
         ANIMATION_FRAME.with(|stored| stored.borrow_mut().active = active);
-        if active {
+        if active && !RESUME_FRAME.with(|stored| stored.borrow().dispatching) {
             update_window_without_view(|window, _cx| schedule_animation_frame(window))?;
         }
         Ok(())
+    }
+
+    /// Runs synchronously before the first restored frame is painted. Retained
+    /// batch setters (applyBatch and setQuads) may update data in this callback;
+    /// GPUI reads and window updates cannot reenter the borrowed App context.
+    /// Registration samples a baseline rather than emitting an initial resume.
+    #[cfg(target_os = "macos")]
+    #[napi]
+    pub fn set_resume_frame_callback(
+        &self,
+        env: Env,
+        #[napi(ts_arg_type = "((timestampMs: number) => void) | null")] callback: Either<
+            FunctionRef<f64, ()>,
+            Null,
+        >,
+    ) -> Result<()> {
+        if matches!(callback, Either::A(_)) && !RESUME_FRAME.with(|stored| {
+            let state = stored.borrow();
+            state.dispatching || state.window.is_some()
+        }) {
+            return Err(Error::from_reason("GPUI window is not available for resume frames"));
+        }
+        let handler = match callback {
+            Either::A(callback) => Some(Rc::new(move |timestamp_ms| {
+                if let Err(error) = callback
+                    .borrow_back(&env)
+                    .and_then(|callback| callback.call(timestamp_ms))
+                {
+                    log::error!("Resume frame callback failed: {error}");
+                }
+            }) as Rc<dyn Fn(f64)>),
+            Either::B(_) => None,
+        };
+        let dispatching = RESUME_FRAME.with(|stored| {
+            let mut state = stored.borrow_mut();
+            if !state.dispatching {
+                state.sample();
+                state.pending = false;
+            }
+            state.callback = handler;
+            if state.callback.is_none() {
+                state.pending = false;
+            }
+            state.dispatching
+        });
+        if dispatching || RESUME_FRAME.with(|stored| stored.borrow().callback.is_none()) {
+            return Ok(());
+        }
+        update_window_without_view(|window, _cx| schedule_resume_frame(window))
     }
 
     /// Subscribe to native window activation. The first asynchronous callback
@@ -2471,13 +2973,17 @@ impl GpuixRenderer {
 
     /// The current text selection joined in document order, or null.
     #[napi]
-    pub fn get_selected_text(&self) -> Option<String> {
-        self.selection.lock().selected_text()
+    pub fn get_selected_text(&self) -> Result<Option<String>> {
+        #[cfg(target_os = "macos")]
+        reject_during_resume()?;
+        Ok(self.selection.lock().selected_text())
     }
 
     /// Drop the current selection and request a repaint.
     #[napi]
     pub fn clear_selection(&self) -> Result<()> {
+        #[cfg(target_os = "macos")]
+        reject_during_resume()?;
         self.selection.lock().clear();
         self.request_invalidate()
     }
@@ -2489,6 +2995,8 @@ impl GpuixRenderer {
     /// x and y are negative pixel values (scroll down = more negative y).
     #[napi]
     pub fn scroll_to(&self, element_id: f64, x: f64, y: f64) -> Result<()> {
+        #[cfg(target_os = "macos")]
+        reject_during_resume()?;
         let id = to_element_id(element_id)?;
         #[cfg(target_os = "macos")]
         if !VIRTUAL_LIST_STATES.with(|cell| {
@@ -2539,6 +3047,8 @@ impl GpuixRenderer {
         index: f64,
         offset_in_item: Option<f64>,
     ) -> Result<()> {
+        #[cfg(target_os = "macos")]
+        reject_during_resume()?;
         let id = to_element_id(element_id)?;
         let index = index as usize;
         let offset = offset_in_item.unwrap_or(0.0) as f32;
@@ -2583,6 +3093,8 @@ impl GpuixRenderer {
     /// estimates, because it is the anchor gpui itself scrolls by.
     #[napi]
     pub fn get_list_scroll_top(&self, element_id: f64) -> Result<Option<Vec<f64>>> {
+        #[cfg(target_os = "macos")]
+        reject_during_resume()?;
         let id = to_element_id(element_id)?;
         #[cfg(target_os = "macos")]
         return Ok(VIRTUAL_LIST_STATES.with(|cell| {
@@ -2618,6 +3130,8 @@ impl GpuixRenderer {
     /// Returns [x, y] or null if the element has no scroll handle.
     #[napi]
     pub fn get_scroll_offset(&self, element_id: f64) -> Result<Option<Vec<f64>>> {
+        #[cfg(target_os = "macos")]
+        reject_during_resume()?;
         let id = to_element_id(element_id)?;
         #[cfg(target_os = "macos")]
         return Ok(VIRTUAL_LIST_STATES
@@ -2804,6 +3318,8 @@ impl GpuixRenderer {
 
     #[napi]
     pub fn get_automation_tree(&self) -> Result<String> {
+        #[cfg(target_os = "macos")]
+        reject_during_resume()?;
         self.request_invalidate()?;
         let bounds = self.automation_bounds()?;
         let tree = self.tree.lock().unwrap();
@@ -2832,18 +3348,22 @@ impl GpuixRenderer {
     }
 
     #[napi]
-    pub fn get_all_text(&self) -> Vec<String> {
+    pub fn get_all_text(&self) -> Result<Vec<String>> {
+        #[cfg(target_os = "macos")]
+        reject_during_resume()?;
         let tree = self.tree.lock().unwrap();
         let mut texts = Vec::new();
         if let Some(root_id) = tree.root_id {
             collect_text(root_id, &tree, &mut texts);
         }
-        texts
+        Ok(texts)
     }
 
     #[napi]
-    pub fn get_painted_text(&self) -> Vec<String> {
-        crate::text::painted_text()
+    pub fn get_painted_text(&self) -> Result<Vec<String>> {
+        #[cfg(target_os = "macos")]
+        reject_during_resume()?;
+        Ok(crate::text::painted_text())
     }
 
     /// Every highlight wash painted in the last frame, in paint order.
@@ -2851,11 +3371,13 @@ impl GpuixRenderer {
     /// A quad is invisible to `getPaintedText()`, so this is the only way to
     /// assert on `highlight` without a screenshot.
     #[napi]
-    pub fn get_painted_highlights(&self) -> Vec<crate::element_tree::HighlightMatch> {
-        crate::text::painted_highlights()
+    pub fn get_painted_highlights(&self) -> Result<Vec<crate::element_tree::HighlightMatch>> {
+        #[cfg(target_os = "macos")]
+        reject_during_resume()?;
+        Ok(crate::text::painted_highlights()
             .into_iter()
             .map(Into::into)
-            .collect()
+            .collect())
     }
 
     /// Simulate space-separated keystrokes through the focused element's input pipeline.

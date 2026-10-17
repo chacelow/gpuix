@@ -707,6 +707,7 @@ export type NativeRenderer = MutationHost &
       | "setWindowSelectionChange"
       | "setAnimationFrameCallback"
       | "setAnimationFrameActive"
+      | "setResumeFrameCallback"
       | "onWindowActiveChange"
       | "onWindowAppearanceChange"
       | "getWindowAppearance"
