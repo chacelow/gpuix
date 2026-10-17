@@ -151,6 +151,8 @@ export declare class GpuixRenderer {
   minimizeWindow(): void
   /** Run the native zoom or maximize operation. */
   zoomWindow(): void
+  /** Perform the system-configured titlebar double-click action. */
+  titlebarDoubleClick(): void
   /** Enter or exit native fullscreen. */
   toggleFullscreen(): void
   setWindowTitle(title: string): void

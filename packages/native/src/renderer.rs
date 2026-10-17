@@ -2931,6 +2931,28 @@ impl GpuixRenderer {
         ))
     }
 
+    /// Perform the system-configured titlebar double-click action.
+    #[napi]
+    pub fn titlebar_double_click(&self) -> Result<()> {
+        #[cfg(target_os = "macos")]
+        return update_window(|_view, window, _cx| window.titlebar_double_click());
+
+        // Zed's Linux custom titlebar zooms the window. Native Windows captions handle
+        // double-click themselves; transparent custom captions need the same zoom command.
+        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
+        return self.send_ui_command(UiCommand::ZoomWindow);
+
+        #[cfg(not(any(
+            target_os = "macos",
+            target_os = "windows",
+            target_os = "linux",
+            target_os = "freebsd"
+        )))]
+        Err(Error::from_reason(
+            "The production GPUIX renderer does not support this operating system",
+        ))
+    }
+
     /// Enter or exit native fullscreen.
     #[napi]
     pub fn toggle_fullscreen(&self) -> Result<()> {
