@@ -1033,6 +1033,12 @@ renderer.getDebugFrameOverlayStats()
 
 `p90Ms` is the overlay **10%** line. `p99Ms` is the **1%** line. Those are the slow tail.
 
+`frames` counts GPUI draws, not presentations: a cached scene can be presented
+without another draw. On Windows, `successfulPresents` counts successful DXGI
+`Present` calls, including cached scenes. Failed presents and draws skipped during
+device recovery do not increment it. Other platforms omit this field. A successful
+call is not a guarantee that the frame became visible on the physical display.
+
 The overlay shows **draw time**, not FPS. `8.3 MS` is about 120 Hz.
 
 The chat example has a regression test for this: `examples/chat.perf.test.tsx`. It times mount, wheel draw, and sidebar clicks. It asserts p95, not every frame.
@@ -1118,6 +1124,13 @@ can `process.exit`, matching macOS. All platforms use GPUI's native platform,
 window, renderer, input, scroll, clipboard, keyboard, and IME implementations.
 The embedded macOS run-loop extension comes from the pinned GPUIX fork. CI runs
 the full React and example test suites through DirectX on Windows.
+
+On Windows, `closeWindow()` and native renderer destruction invalidate frame and
+close callbacks, unregister the renderer, and enqueue one terminal UI shutdown.
+The UI loop exits on that command even if an outstanding callback still retains a
+completion sender. Each JavaScript environment has one cleanup hook; environment
+teardown shuts down only renderers that remain registered. Repeated close followed
+by destruction does not enqueue another shutdown.
 
 > [!IMPORTANT]
 > On macOS, never drive `tick()` from a `setImmediate` loop. That spins at tens of thousands of

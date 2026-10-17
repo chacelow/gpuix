@@ -530,6 +530,8 @@ export interface DebugFrameOverlayStats {
   p99Ms?: number
   maxMs?: number
   frames: number
+  /** Successful Windows DXGI Present calls, including cached frames; absent elsewhere. */
+  successfulPresents?: number
   samples: number
 }
 

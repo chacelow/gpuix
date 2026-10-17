@@ -57,6 +57,12 @@ mod windows_protocol;
 #[cfg(target_os = "windows")]
 #[path = "windows_bridge.rs"]
 mod windows_bridge;
+#[cfg(any(test, target_os = "windows"))]
+#[path = "windows_lifecycle.rs"]
+mod windows_lifecycle;
+#[cfg(target_os = "windows")]
+#[path = "windows_cleanup.rs"]
+mod windows_cleanup;
 
 /// The Window menu items act on the focused window, and the root element is the
 /// only place in GPUIX that has one. `crate::app_menu` owns everything else.
@@ -926,6 +932,7 @@ pub(crate) fn debug_frame_overlay_stats_js(
         p99_ms: stats.p99_ms.map(|ms| ms as f64),
         max_ms: stats.max_ms.map(|ms| ms as f64),
         frames: stats.frames as f64,
+        successful_presents: stats.successful_presents.map(|count| count as f64),
         samples: stats.samples as f64,
     }
 }
@@ -1075,6 +1082,7 @@ enum UiCommand {
     WindowsShutdownBridge,
     ActivateWindow,
     MinimizeWindow,
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     CloseWindow,
     ZoomWindow,
     ToggleFullscreen,
@@ -1234,10 +1242,15 @@ async fn run_ui_commands(
                 windows_bridge::restore_cursor(x, y);
             }),
             #[cfg(target_os = "windows")]
-            UiCommand::WindowsShutdownBridge => window.update(cx, |_, window, _| {
-                windows_bridge::shutdown(window);
-                window.remove_window();
-            }),
+            UiCommand::WindowsShutdownBridge => {
+                let _ = window.update(cx, |_, window, _| {
+                    windows_bridge::shutdown(window);
+                    window.remove_window();
+                });
+                windows_bridge::clear();
+                // Completion TSFNs can retain senders, so shutdown cannot wait for EOF.
+                break;
+            }
             UiCommand::Invalidate => refresh_ui_window(window, cx),
             UiCommand::ActivateWindow => window.update(cx, |_view, window, cx| {
                 cx.activate(true);
@@ -1246,9 +1259,8 @@ async fn run_ui_commands(
             UiCommand::MinimizeWindow => {
                 window.update(cx, |_view, window, _cx| window.minimize_window())
             }
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
             UiCommand::CloseWindow => window.update(cx, |_view, window, _cx| {
-                #[cfg(target_os = "windows")]
-                windows_bridge::shutdown(window);
                 window.remove_window();
             }),
             UiCommand::ZoomWindow => window.update(cx, |_view, window, _cx| window.zoom_window()),
@@ -1663,6 +1675,8 @@ pub struct GpuixRenderer {
     ui_running: Arc<AtomicBool>,
     #[cfg(target_os = "windows")]
     windows_owner: Arc<windows_bridge::Owner>,
+    #[cfg(target_os = "windows")]
+    windows_registration: parking_lot::Mutex<Option<windows_cleanup::RendererRegistration>>,
 }
 
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
@@ -1685,6 +1699,12 @@ impl GpuixRenderer {
             .ok_or_else(|| Error::from_reason("GPUI application is not initialized"))?
             .unbounded_send(command)
             .map_err(|_| Error::from_reason("The GPUI UI thread is not running"))
+    }
+
+    #[cfg(target_os = "windows")]
+    fn shutdown_windows(&self) {
+        drop(self.windows_registration.lock().take());
+        self.ui_commands.lock().unwrap().take();
     }
 
     fn begin_path_prompt(&self, options: gpui::PathPromptOptions, deferred: PathPromptDeferred) {
@@ -1883,6 +1903,8 @@ impl GpuixRenderer {
             ui_running: Arc::new(AtomicBool::new(false)),
             #[cfg(target_os = "windows")]
             windows_owner: Arc::new(windows_bridge::Owner::default()),
+            #[cfg(target_os = "windows")]
+            windows_registration: parking_lot::Mutex::new(None),
         }
     }
 
@@ -1914,17 +1936,12 @@ impl GpuixRenderer {
 
         #[cfg(target_os = "windows")]
         {
+            let registry = windows_cleanup::for_env(env)?;
             self.init_threaded(options)?;
-            let owner = self.windows_owner.clone();
-            let sender = self.ui_commands.lock().unwrap().as_ref().unwrap().clone();
-            if let Err(error) = env.add_env_cleanup_hook((owner.clone(), sender.clone()), |(owner, sender)| {
-                owner.shutdown();
-                sender.unbounded_send(UiCommand::WindowsShutdownBridge).ok();
-            }) {
-                owner.shutdown();
-                sender.unbounded_send(UiCommand::WindowsShutdownBridge).ok();
-                return Err(error);
-            }
+            *self.windows_registration.lock() = Some(registry.register(windows_cleanup::RendererShutdown {
+                owner: Arc::clone(&self.windows_owner),
+                sender: self.windows_command_sender()?,
+            }));
             Ok(())
         }
     }
@@ -2326,6 +2343,9 @@ impl GpuixRenderer {
         {
             let running = self.ui_running.load(Ordering::Acquire);
             if !running {
+                #[cfg(target_os = "windows")]
+                self.shutdown_windows();
+                #[cfg(any(target_os = "linux", target_os = "freebsd"))]
                 self.ui_commands.lock().unwrap().take();
             }
             return Ok(running);
@@ -2824,7 +2844,16 @@ impl GpuixRenderer {
         #[cfg(target_os = "macos")]
         return update_window_without_view(|window, _cx| window.remove_window());
 
-        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
+        #[cfg(target_os = "windows")]
+        {
+            if !*self.initialized.lock().unwrap() {
+                return Err(Error::from_reason("GPUI application is not initialized"));
+            }
+            self.shutdown_windows();
+            return Ok(());
+        }
+
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         return self.send_ui_command(UiCommand::CloseWindow);
 
         #[cfg(not(any(
@@ -4671,6 +4700,9 @@ impl WebGpuixRenderer {
 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
 impl Drop for GpuixRenderer {
     fn drop(&mut self) {
+        #[cfg(target_os = "windows")]
+        self.shutdown_windows();
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         self.ui_commands.lock().unwrap().take();
     }
 }
@@ -8622,6 +8654,8 @@ pub struct DebugFrameOverlayStats {
     pub p99_ms: Option<f64>,
     pub max_ms: Option<f64>,
     pub frames: f64,
+    /// Successful Windows DXGI Present calls, including cached frames; absent elsewhere.
+    pub successful_presents: Option<f64>,
     pub samples: f64,
 }
 

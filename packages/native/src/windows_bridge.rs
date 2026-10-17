@@ -5,6 +5,7 @@ use napi::bindgen_prelude::*;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use parking_lot::Mutex;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -16,10 +17,12 @@ use windows::Win32::UI::WindowsAndMessaging::{IsIconic, IsWindowVisible, SetPhys
 pub(super) struct Owner {
     pub frames: Mutex<FrameProtocol>,
     pub close: Mutex<CloseProtocol>,
+    shutdown: AtomicBool,
 }
 
 impl Owner {
     pub fn shutdown(&self) {
+        if self.shutdown.swap(true, Ordering::AcqRel) { return; }
         self.frames.lock().shutdown();
         self.close.lock().replace(false);
     }
