@@ -18,6 +18,7 @@ function motionStyleKey(style: MotionProps["animate"] | false | undefined) {
     style.bottom,
     style.left,
     style.borderRadius,
+    style.scale,
   ]
 }
 
@@ -64,54 +65,72 @@ export interface MotionDivProps extends MotionProps {
   autoFocus?: boolean
 }
 
-const MotionDiv = forwardRef<PublicInstance, MotionDivProps>(function MotionDiv(
-  { initial, animate, exit, transition, onMotionComplete, ...props },
-  ref
-): ReactElement {
-  const presence = useContext(PresenceContext)
-  const [isPresent, safeToRemove] = usePresence()
-  const resolvedInitial = presence?.initial === false ? false : initial
-  const resolvedAnimate = !isPresent && exit ? exit : animate
+export interface MotionSvgProps extends MotionProps {
+  /** Raw SVG markup rendered directly by GPUI. */
+  source?: string
+  /** Desktop local path. */
+  src?: string
+  style?: StyleDesc
+  onMotionComplete?: Props["onMotionComplete"]
+}
 
-  useEffect(() => {
-    if (!isPresent && !exit) safeToRemove?.()
-  }, [exit, isPresent, safeToRemove])
+function createMotionComponent<P extends MotionProps & { onMotionComplete?: Props["onMotionComplete"] }>(
+  type: "div" | "svg",
+  displayName: string
+) {
+  const component = forwardRef<PublicInstance, P>(function Motion(
+    { initial, animate, exit, transition, onMotionComplete, ...props },
+    ref
+  ): ReactElement {
+    const presence = useContext(PresenceContext)
+    const [isPresent, safeToRemove] = usePresence()
+    const resolvedInitial = presence?.initial === false ? false : initial
+    const resolvedAnimate = !isPresent && exit ? exit : animate
 
-  const motionKey = JSON.stringify([
-    isPresent,
-    motionStyleKey(resolvedInitial),
-    motionStyleKey(resolvedAnimate),
-    transition?.duration,
-    transition?.delay,
-    transition?.ease,
-  ])
-  const generation = useMemo(() => ++nextMotionGeneration, [motionKey])
+    useEffect(() => {
+      if (!isPresent && !exit) safeToRemove?.()
+    }, [exit, isPresent, safeToRemove])
 
-  const motionDescription = {
-    generation,
-    isExit: !isPresent && exit !== undefined,
-    initial: resolvedInitial,
-    animate: resolvedAnimate,
-    transition,
-  }
-  const hostProps: Props = {
-    ...props,
-    ref,
-    motion: motionDescription,
-  }
-  if (!isPresent || onMotionComplete) {
-    hostProps.onMotionComplete = (event) => {
-      if (event.motionGeneration !== generation) return
-      onMotionComplete?.(event)
-      if (!isPresent) safeToRemove?.()
+    const motionKey = JSON.stringify([
+      isPresent,
+      motionStyleKey(resolvedInitial),
+      motionStyleKey(resolvedAnimate),
+      transition?.duration,
+      transition?.delay,
+      transition?.ease,
+    ])
+    const generation = useMemo(() => ++nextMotionGeneration, [motionKey])
+
+    const motionDescription = {
+      generation,
+      isExit: !isPresent && exit !== undefined,
+      initial: resolvedInitial,
+      animate: resolvedAnimate,
+      transition,
     }
-  }
-  return createElement("div", hostProps)
-})
+    const hostProps: Props = {
+      ...(props as Props),
+      ref,
+      motion: motionDescription,
+    }
+    if (!isPresent || onMotionComplete) {
+      hostProps.onMotionComplete = (event) => {
+        if (event.motionGeneration !== generation) return
+        onMotionComplete?.(event)
+        if (!isPresent) safeToRemove?.()
+      }
+    }
+    return createElement(type, hostProps)
+  })
+  component.displayName = displayName
+  return component
+}
 
 /** Native animations with a Motion-like declarative React API. */
 export const motion = {
-  div: MotionDiv,
+  div: createMotionComponent<MotionDivProps>("div", "motion.div"),
+  /** `scale` is paint-only: the SVG rasterises once at its layout size and scales on the GPU. */
+  svg: createMotionComponent<MotionSvgProps>("svg", "motion.svg"),
 } as const
 
 // There is no `VirtualList` React wrapper. Windowing on the React side is the

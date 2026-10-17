@@ -213,6 +213,10 @@ pub struct StyleDesc {
     pub background_color: Option<String>,
     pub color: Option<String>,
     pub opacity: Option<f64>,
+    /// Paint-only uniform scale about the element centre. Honoured by `svg`,
+    /// which rasterises once at its layout size and scales on the GPU; layout
+    /// and hit testing keep the unscaled bounds.
+    pub scale: Option<f64>,
 
     // Border
     pub border_width: Option<f64>,

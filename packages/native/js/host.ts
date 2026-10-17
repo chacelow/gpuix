@@ -33,6 +33,8 @@ export interface MotionStyle {
   bottom?: number
   left?: number
   borderRadius?: number
+  /** Paint-only uniform scale about the centre; honoured by `svg`. */
+  scale?: number
 }
 
 export type MotionEase =
@@ -167,6 +169,8 @@ export interface StyleDesc {
   backgroundColor?: string
   color?: string
   opacity?: number
+  /** Paint-only uniform scale about the centre; `svg` rasterises once and scales on the GPU. */
+  scale?: number
 
   borderWidth?: number
   borderTopWidth?: number

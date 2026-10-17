@@ -459,6 +459,13 @@ fn percent_decode(input: &str) -> Vec<u8> {
     out
 }
 
+/// Paint-only GPU scale. `None` for the identity so the unscaled path keeps
+/// GPUI's default transformation.
+fn svg_scale(style: Option<&crate::style::StyleDesc>) -> Option<f32> {
+    let scale = style?.scale?;
+    (scale.is_finite() && scale > 0.0 && scale != 1.0).then_some(scale as f32)
+}
+
 impl CustomElement for SvgElement {
     fn render(
         &mut self,
@@ -484,11 +491,11 @@ impl CustomElement for SvgElement {
             .and_then(|style| style.color.as_deref())
             .and_then(crate::color::parse_color_rgba)
             .unwrap_or_else(|| gpui::rgb(0xe2e2e2).into());
-        let mut icon = gpui::svg()
-            .data(bytes)
-            .flex_none()
-            .text_color(tint)
-            .id(element_id);
+        let mut svg = gpui::svg().data(bytes).flex_none().text_color(tint);
+        if let Some(scale) = svg_scale(ctx.style) {
+            svg = svg.with_transformation(gpui::Transformation::scale(gpui::size(scale, scale)));
+        }
+        let mut icon = svg.id(element_id);
         if let Some(style) = ctx.style {
             icon = crate::renderer::apply_interactive_styles(icon, style);
         }

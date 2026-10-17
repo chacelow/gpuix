@@ -18,6 +18,7 @@ pub(crate) struct MotionStyle {
     pub bottom: Option<f64>,
     pub left: Option<f64>,
     pub border_radius: Option<f64>,
+    pub scale: Option<f64>,
 }
 
 impl MotionStyle {
@@ -31,6 +32,7 @@ impl MotionStyle {
             bottom: self.bottom.or(fallback.bottom),
             left: self.left.or(fallback.left),
             border_radius: self.border_radius.or(fallback.border_radius),
+            scale: self.scale.or(fallback.scale),
         }
     }
 
@@ -48,6 +50,7 @@ impl MotionStyle {
             bottom: value(self.bottom, target.bottom, progress),
             left: value(self.left, target.left, progress),
             border_radius: value(self.border_radius, target.border_radius, progress),
+            scale: value(self.scale, target.scale, progress),
         }
     }
 
@@ -75,6 +78,9 @@ impl MotionStyle {
         }
         if let Some(value) = self.border_radius {
             style.border_radius = Some(value);
+        }
+        if let Some(value) = self.scale {
+            style.scale = Some(value);
         }
     }
 }
@@ -313,6 +319,7 @@ fn validate_style(style: &MotionStyle) -> Result<(), String> {
         ("bottom", style.bottom),
         ("left", style.left),
         ("borderRadius", style.border_radius),
+        ("scale", style.scale),
     ] {
         if value.is_some_and(|value| !value.is_finite() || value.abs() > f32::MAX as f64) {
             return Err(format!("motion {name} must fit a finite 32-bit float"));
@@ -329,6 +336,9 @@ fn validate_style(style: &MotionStyle) -> Result<(), String> {
         .is_some_and(|value| !(0.0..=1.0).contains(&value))
     {
         return Err("motion opacity must be between 0 and 1".to_string());
+    }
+    if style.scale.is_some_and(|value| value <= 0.0) {
+        return Err("motion scale must be positive".to_string());
     }
     Ok(())
 }
@@ -444,6 +454,35 @@ mod tests {
                 .width,
             Some(25.0)
         );
+    }
+
+    #[test]
+    fn scale_interpolates_and_reaches_the_resolved_style() {
+        let started = Instant::now();
+        let description = serde_json::json!({
+            "initial": { "scale": 1.0 },
+            "animate": { "scale": 2.0 },
+            "transition": { "duration": 1.0, "ease": "linear" }
+        });
+        let state = MotionState::new(&description, started).unwrap();
+        let middle = state
+            .visible_style(started + Duration::from_millis(250))
+            .unwrap();
+        assert_eq!(middle.scale, Some(1.25));
+        let mut style = StyleDesc::default();
+        middle.apply_to(&mut style);
+        assert_eq!(style.scale, Some(1.25));
+        assert_eq!(style.width, None);
+    }
+
+    #[test]
+    fn rejects_non_positive_scale() {
+        let now = Instant::now();
+        for scale in [0.0, -1.0] {
+            let description =
+                serde_json::json!({ "animate": { "scale": scale }, "transition": {} });
+            assert!(MotionState::new(&description, now).is_err());
+        }
     }
 
     #[test]
