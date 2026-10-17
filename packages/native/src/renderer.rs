@@ -72,6 +72,97 @@ fn query_window_should_close() -> bool {
     handler.map(|handler| handler()).unwrap_or(true)
 }
 
+#[cfg(target_os = "macos")]
+struct AnimationFrameState {
+    callback: Option<Rc<dyn Fn(f64)>>,
+    active: bool,
+    pending: bool,
+    origin: std::time::Instant,
+}
+
+#[cfg(target_os = "macos")]
+fn schedule_animation_frame(window: &gpui::Window) {
+    let schedule = ANIMATION_FRAME.with(|stored| {
+        let mut state = stored.borrow_mut();
+        if !state.active || state.callback.is_none() || state.pending {
+            return false;
+        }
+        state.pending = true;
+        true
+    });
+    if !schedule {
+        return;
+    }
+    window.on_next_frame(|window, _cx| {
+        let frame = ANIMATION_FRAME.with(|stored| {
+            let mut state = stored.borrow_mut();
+            state.pending = false;
+            if !state.active {
+                return None;
+            }
+            state
+                .callback
+                .clone()
+                .map(|callback| (callback, state.origin.elapsed().as_secs_f64() * 1000.0))
+        });
+        if let Some((callback, timestamp_ms)) = frame {
+            callback(timestamp_ms);
+            schedule_animation_frame(window);
+        }
+    });
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod animation_frame_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    struct FrameView;
+
+    impl gpui::Render for FrameView {
+        fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> gpui::Div {
+            gpui::div()
+        }
+    }
+
+    #[gpui::test]
+    fn active_frames_have_one_owner_and_cancel_without_rescheduling(cx: &mut gpui::TestAppContext) {
+        let window = cx.add_window(|_, _| FrameView);
+        let calls = Rc::new(Cell::new(0));
+        ANIMATION_FRAME.with(|stored| {
+            let calls = calls.clone();
+            *stored.borrow_mut() = AnimationFrameState {
+                callback: Some(Rc::new(move |_| calls.set(calls.get() + 1))),
+                active: true,
+                pending: false,
+                origin: std::time::Instant::now(),
+            };
+        });
+        window
+            .update(cx, |_, window, cx| {
+                schedule_animation_frame(window);
+                schedule_animation_frame(window);
+                assert_eq!(window.simulate_next_frame(cx), 1);
+                assert_eq!(calls.get(), 1);
+                ANIMATION_FRAME.with(|stored| stored.borrow_mut().active = false);
+                assert_eq!(window.simulate_next_frame(cx), 1);
+                assert_eq!(calls.get(), 1);
+                assert_eq!(window.simulate_next_frame(cx), 0);
+                schedule_animation_frame(window);
+                assert_eq!(window.simulate_next_frame(cx), 0);
+                ANIMATION_FRAME.with(|stored| stored.borrow_mut().active = true);
+                schedule_animation_frame(window);
+                assert_eq!(window.simulate_next_frame(cx), 1);
+                assert_eq!(calls.get(), 2);
+                ANIMATION_FRAME.with(|stored| stored.borrow_mut().callback = None);
+                assert_eq!(window.simulate_next_frame(cx), 1);
+                assert_eq!(calls.get(), 2);
+                assert_eq!(window.simulate_next_frame(cx), 0);
+            })
+            .unwrap();
+    }
+}
+
 /// Parse a CSS font-weight value (string or number) into a GPUI FontWeight.
 /// Accepts named keywords ("bold", "semibold"), numeric strings ("700"),
 /// and raw numbers (700). Falls back to 400 (normal) for unrecognized values.
@@ -140,6 +231,13 @@ thread_local! {
     static GPUI_WINDOW: RefCell<Option<gpui::WindowHandle<GpuixView>>> = const { RefCell::new(None) };
     #[cfg(target_os = "macos")]
     static WINDOW_CLOSE_HANDLER: RefCell<Option<Rc<dyn Fn() -> bool>>> = const { RefCell::new(None) };
+    #[cfg(target_os = "macos")]
+    static ANIMATION_FRAME: RefCell<AnimationFrameState> = RefCell::new(AnimationFrameState {
+        callback: None,
+        active: false,
+        pending: false,
+        origin: std::time::Instant::now(),
+    });
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     static WEB_APP: RefCell<Option<gpui::ApplicationHandle>> = const { RefCell::new(None) };
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
@@ -1694,6 +1792,47 @@ impl GpuixRenderer {
             window.on_window_should_close(cx, |_, _| query_window_should_close());
             WINDOW_CLOSE_HANDLER.with(|stored| *stored.borrow_mut() = Some(handler));
         })
+    }
+
+    /// macOS embedded-loop callback, once per requested display frame.
+    /// timestampMs is monotonic milliseconds, not wall-clock time.
+    /// Return synchronously; do not mutate GPUI reentrantly (defer React updates).
+    /// Passing null releases the callback. active=false requests no further frames.
+    #[cfg(target_os = "macos")]
+    #[napi]
+    pub fn set_animation_frame_callback(
+        &self,
+        env: Env,
+        #[napi(ts_arg_type = "((timestampMs: number) => void) | null")] callback: Either<
+            FunctionRef<f64, ()>,
+            Null,
+        >,
+    ) -> Result<()> {
+        let handler = match callback {
+            Either::A(callback) => Some(Rc::new(move |timestamp_ms| {
+                if let Err(error) = callback
+                    .borrow_back(&env)
+                    .and_then(|callback| callback.call(timestamp_ms))
+                {
+                    log::error!("Animation frame callback failed: {error}");
+                }
+            }) as Rc<dyn Fn(f64)>),
+            Either::B(_) => None,
+        };
+        ANIMATION_FRAME.with(|stored| stored.borrow_mut().callback = handler);
+        update_window_without_view(|window, _cx| schedule_animation_frame(window))
+    }
+
+    /// Enable display-frame callbacks. False stops requesting frames; an already
+    /// queued frame drains without calling JavaScript or requesting another frame.
+    #[cfg(target_os = "macos")]
+    #[napi]
+    pub fn set_animation_frame_active(&self, active: bool) -> Result<()> {
+        ANIMATION_FRAME.with(|stored| stored.borrow_mut().active = active);
+        if active {
+            update_window_without_view(|window, _cx| schedule_animation_frame(window))?;
+        }
+        Ok(())
     }
 
     /// Bring the window forward and give it focus. This is how a window opened

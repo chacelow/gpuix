@@ -93,6 +93,18 @@ export declare class GpuixRenderer {
    */
   setWindowShouldClose(callback: () => boolean): void
   /**
+   * macOS embedded-loop callback, once per requested display frame.
+   * timestampMs is monotonic milliseconds, not wall-clock time.
+   * Return synchronously; do not mutate GPUI reentrantly (defer React updates).
+   * Passing null releases the callback. active=false requests no further frames.
+   */
+  setAnimationFrameCallback(callback: ((timestampMs: number) => void) | null): void
+  /**
+   * Enable display-frame callbacks. False stops requesting frames; an already
+   * queued frame drains without calling JavaScript or requesting another frame.
+   */
+  setAnimationFrameActive(active: boolean): void
+  /**
    * Bring the window forward and give it focus. This is how a window opened
    * with `show: false` or `focus: false` is revealed later.
    */
