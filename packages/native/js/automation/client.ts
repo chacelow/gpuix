@@ -1001,6 +1001,8 @@ export async function launch(options: {
   args?: string[]
   cwd?: string
   env?: NodeJS.ProcessEnv
+  /** Receives the child's stderr. Without it stderr is piped and discarded. */
+  onStderr?: (chunk: string) => void
 }): Promise<App> {
   const { spawn } = await importNodeModule<typeof import("node:child_process")>(
     "node:child_process"
@@ -1017,6 +1019,10 @@ export async function launch(options: {
       stdio: ["pipe", "pipe", "pipe"],
     }
   )
+  if (options.onStderr) {
+    const onStderr = options.onStderr
+    child.stderr.on("data", (buf: Buffer) => onStderr(buf.toString("utf8")))
+  }
   const app = await connectStdio({
     write: (chunk) => {
       child.stdin.write(chunk)
