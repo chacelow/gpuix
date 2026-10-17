@@ -45,6 +45,10 @@ use crate::style::StyleDesc;
 use crate::text::{selectable_text, selection_frame_reset, SharedSelection};
 use crate::theme::Theme;
 
+#[cfg(test)]
+#[path = "focus_tests.rs"]
+mod focus_tests;
+
 /// The Window menu items act on the focused window, and the root element is the
 /// only place in GPUIX that has one. `crate::app_menu` owns everything else.
 #[cfg(target_os = "macos")]
@@ -3994,7 +3998,7 @@ pub(crate) struct GpuixView {
     pub(crate) focus_handles: HashMap<u64, gpui::FocusHandle>,
     pending_focus_element: Option<PendingFocus>,
     /// Active focus/blur subscriptions keyed by element and event type.
-    pub(crate) focus_subscriptions: HashMap<(u64, String), gpui::Subscription>,
+    pub(crate) focus_subscriptions: HashMap<(u64, &'static str), gpui::Subscription>,
     /// Registry for custom element types (input, editor, diff, etc.).
     /// Stores factories (one per type) and live instances (one per element ID).
     pub(crate) custom_registry: CustomElementRegistry,
@@ -5137,12 +5141,34 @@ impl VirtualListEntry {
 impl GpuixView {
     pub(crate) fn request_focus(&mut self, id: u64, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) {
         self.reveal_virtual_list_ancestor(id);
-        if let Some(handle) = self.focus_handles.get(&id) {
-            self.pending_focus_element = None;
-            handle.focus(window, cx);
-        } else {
-            self.pending_focus_element = Some(PendingFocus::new(id, window, cx));
+        if let Some(handle) = self
+            .focus_handles
+            .get(&id)
+            .filter(|handle| !handle.is_focused(window))
+        {
+            let listeners_ready = {
+                let tree = self.tree.lock().unwrap();
+                tree.elements.get(&id).is_some_and(|element| {
+                    ["focus", "blur"].into_iter().all(|event| {
+                        !element.events().contains(event)
+                            || self.focus_subscriptions.contains_key(&(id, event))
+                    })
+                }) && self
+                    .focused_element_id(window)
+                    .and_then(|source| tree.elements.get(&source))
+                    .is_none_or(|source| {
+                        !source.events().contains("blur")
+                            || self.focus_subscriptions.contains_key(&(source.id, "blur"))
+                    })
+            };
+            // New listeners must activate before the focus-path transition.
+            if listeners_ready {
+                handle.focus(window, cx);
+            }
         }
+        // Settled handles still focus synchronously. Retain every request
+        // until sync so new autoFocus handles in the same update cannot win.
+        self.pending_focus_element = Some(PendingFocus::new(id, window, cx));
         cx.notify();
     }
 
@@ -5347,11 +5373,14 @@ impl GpuixView {
     ) {
         // Checked before this frame's autoFocus runs: an explicit request
         // outranks autoFocus, but not a Tab or click that came after it.
-        if self.pending_focus_element.is_some_and(|pending| {
-            window.focused(cx).map(|handle| handle.id()) != pending.focused_at_request
-        }) {
+        let user_moved_focus = self.pending_focus_element.as_ref().is_some_and(|pending| {
+            window.focused(cx).map(|handle| handle.id())
+                != pending.focused_at_request.as_ref().map(|handle| handle.id())
+        });
+        if user_moved_focus {
             self.pending_focus_element = None;
         }
+        let mut focus_to_apply = None;
         // Only the focusable elements are visited. This runs every frame, and
         // the rest of the tree is orders of magnitude larger.
         //
@@ -5371,8 +5400,8 @@ impl GpuixView {
                 };
                 // Focus once, at creation. Re-focusing every frame would
                 // steal focus back from whatever the user clicked next.
-                if element.auto_focus {
-                    handle.focus(window, cx);
+                if element.auto_focus && !user_moved_focus {
+                    focus_to_apply = Some(handle.clone());
                 }
                 self.focus_handles.insert(id, handle);
             } else if let (Some(handle), Some(index)) =
@@ -5390,16 +5419,18 @@ impl GpuixView {
         // microtask, Windows and Linux render on their own thread).
         if let Some(handle) = self
             .pending_focus_element
+            .as_ref()
+            .filter(|pending| tree.focusable_ids.contains(&pending.id))
             .and_then(|pending| self.focus_handles.get(&pending.id).cloned())
         {
-            handle.focus(window, cx);
+            focus_to_apply = Some(handle);
             self.pending_focus_element = None;
         }
 
         self.focus_subscriptions.retain(|(id, event), _| {
             tree.elements
                 .get(id)
-                .is_some_and(|element| element.events().contains(event))
+                .is_some_and(|element| element.events().contains(*event))
         });
         for &id in &tree.focusable_ids {
             let (Some(element), Some(handle)) =
@@ -5407,7 +5438,7 @@ impl GpuixView {
             else {
                 continue;
             };
-            let focus_key = (id, "focus".to_string());
+            let focus_key = (id, "focus");
             if element.events().contains("focus")
                 && !self.focus_subscriptions.contains_key(&focus_key)
             {
@@ -5417,7 +5448,7 @@ impl GpuixView {
                 });
                 self.focus_subscriptions.insert(focus_key, subscription);
             }
-            let blur_key = (id, "blur".to_string());
+            let blur_key = (id, "blur");
             if element.events().contains("blur")
                 && !self.focus_subscriptions.contains_key(&blur_key)
             {
@@ -5429,26 +5460,47 @@ impl GpuixView {
             }
         }
 
+        if let Some(handle) = focus_to_apply {
+            // Keep the old handle alive if this draw retires its element's
+            // focusability, as when a numeric pad replaces itself with input.
+            let focused_at_sync = window.focused(cx);
+            // on_focus/on_blur activate through defer. Applying focus during
+            // this draw consumes its focus-path transition before activation.
+            // Queue after every subscription so GPUI delivers the next draw's
+            // transition through the same listeners as Tab and click focus.
+            cx.defer_in(window, move |view, window, cx| {
+                if window.focused(cx).map(|handle| handle.id())
+                    == focused_at_sync.as_ref().map(|handle| handle.id())
+                {
+                    handle.focus(window, cx);
+                    // A request for a still-missing handle must survive our
+                    // own autoFocus; only a later user focus cancels it.
+                    if let Some(pending) = view.pending_focus_element.as_mut() {
+                        pending.focused_at_request = window.focused(cx);
+                    }
+                }
+            });
+        }
+
         // Clean up handles for elements that no longer exist.
         self.focus_handles
             .retain(|id, _| tree.focusable_ids.contains(id));
     }
 }
 
-/// A `focusElement` request for an element whose focus handle does not exist
-/// yet. It is dropped when focus moves any other way first (Tab, a click, a
-/// newer request), so a late element never steals focus from the user.
-#[derive(Clone, Copy)]
+/// A `focusElement` request awaiting handle creation or the next sync's
+/// autoFocus arbitration. It is dropped when focus moves any other way first
+/// (Tab, a click, a newer request), so it never overrides later user focus.
 struct PendingFocus {
     id: u64,
-    focused_at_request: Option<gpui::FocusId>,
+    focused_at_request: Option<gpui::FocusHandle>,
 }
 
 impl PendingFocus {
     fn new(id: u64, window: &gpui::Window, cx: &gpui::App) -> Self {
         Self {
             id,
-            focused_at_request: window.focused(cx).map(|handle| handle.id()),
+            focused_at_request: window.focused(cx),
         }
     }
 }
