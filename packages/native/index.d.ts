@@ -111,6 +111,26 @@ export declare class GpuixRenderer {
    */
   onWindowActiveChange(callback: ((active: boolean) => void) | null): void
   /**
+   * Subscribe to the window's light/dark appearance. The first asynchronous
+   * callback reports the current value; later callbacks report changes.
+   * Vibrant variants fold into "light" and "dark". Passing null drops the
+   * GPUI observer. Already queued callbacks may drain.
+   */
+  onWindowAppearanceChange(callback: ((appearance: "light" | "dark") => void) | null): void
+  /**
+   * The window's current light/dark appearance, synchronously. Use it for the
+   * initial theme; onWindowAppearanceChange only reports changes to listeners.
+   */
+  getWindowAppearance(): "light" | "dark"
+  /**
+   * Close the window without consulting setWindowShouldClose, then quit like
+   * the last window closing. Call it after the user has already decided.
+   * Never call it synchronously inside the setWindowShouldClose handler:
+   * GPUI is already borrowed there, so the reentrant borrow panics inside an
+   * AppKit callback and can abort the process.
+   */
+  closeWindow(): void
+  /**
    * Bring the window forward and give it focus. This is how a window opened
    * with `show: false` or `focus: false` is revealed later.
    */

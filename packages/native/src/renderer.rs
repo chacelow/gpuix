@@ -213,6 +213,94 @@ mod window_activation_tests {
     }
 }
 
+#[cfg(test)]
+mod window_appearance_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    fn appearance_view(cx: &mut gpui::TestAppContext) -> gpui::WindowHandle<GpuixView> {
+        cx.add_window(|_, _| {
+            GpuixView::new(
+                Arc::new(Mutex::new(RetainedTree::new())),
+                None,
+                "appearance regression".into(),
+                SharedSelection::default(),
+            )
+        })
+    }
+
+    #[test]
+    fn vibrant_variants_fold_into_light_and_dark() {
+        use gpui::WindowAppearance::*;
+        assert_eq!(
+            [Light, VibrantLight, Dark, VibrantDark].map(appearance_name),
+            ["light", "light", "dark", "dark"]
+        );
+    }
+
+    /// GPUI keeps appearance simulation crate-private; its own
+    /// `test_appearance_change_runs_after_app_update` proves the observer fires.
+    /// This test pins the baseline and that the view owns exactly one observer.
+    #[gpui::test]
+    fn window_appearance_reports_baseline_and_releases_its_observer(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let window = appearance_view(cx);
+        let changes = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let subscribe = |changes: &Arc<parking_lot::Mutex<Vec<&'static str>>>| {
+            let changes = changes.clone();
+            Some(Arc::new(move |appearance| changes.lock().push(appearance))
+                as WindowAppearanceCallback)
+        };
+        let callback = subscribe(&changes);
+        window
+            .update(cx, |view, window, cx| {
+                view.set_window_appearance_change_callback(callback, window, cx);
+                assert!(view.window_appearance_subscription.is_some());
+            })
+            .unwrap();
+        assert_eq!(*changes.lock(), vec!["light"]);
+
+        let callback = subscribe(&changes);
+        window
+            .update(cx, |view, window, cx| {
+                view.set_window_appearance_change_callback(callback, window, cx);
+                view.set_window_appearance_change_callback(None, window, cx);
+                assert!(view.window_appearance_subscription.is_none());
+            })
+            .unwrap();
+        assert_eq!(*changes.lock(), vec!["light", "light"]);
+    }
+
+    /// `closeWindow` relies on GPUI `remove_window` not consulting a close handler
+    /// that vetoes the system close button.
+    #[gpui::test]
+    fn removing_the_window_bypasses_a_vetoing_close_handler(cx: &mut gpui::TestAppContext) {
+        let window = appearance_view(cx);
+        let queries = Rc::new(Cell::new(0));
+        window
+            .update(cx, |_, window, cx| {
+                let queries = queries.clone();
+                window.on_window_should_close(cx, move |_, _| {
+                    queries.set(queries.get() + 1);
+                    false
+                });
+            })
+            .unwrap();
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        assert!(!visual.simulate_close());
+        assert_eq!(queries.get(), 1);
+        assert_eq!(cx.windows().len(), 1);
+
+        window
+            .update(cx, |_, window, _| window.remove_window())
+            .unwrap();
+        cx.run_until_parked();
+        assert!(cx.windows().is_empty());
+        assert_eq!(queries.get(), 1);
+    }
+}
+
 /// Parse a CSS font-weight value (string or number) into a GPUI FontWeight.
 /// Accepts named keywords ("bold", "semibold"), numeric strings ("700"),
 /// and raw numbers (700). Falls back to 400 (normal) for unrecognized values.
@@ -554,6 +642,7 @@ enum UiCommand {
     Invalidate,
     ActivateWindow,
     MinimizeWindow,
+    CloseWindow,
     ZoomWindow,
     ToggleFullscreen,
     SetWindowTitle(String),
@@ -616,6 +705,9 @@ enum UiCommand {
     GetWindowSize {
         response: SyncSender<WindowSize>,
     },
+    GetWindowAppearance {
+        response: SyncSender<&'static str>,
+    },
     GetElementBounds {
         id: u64,
         response: SyncSender<Option<crate::automation::ElementBounds>>,
@@ -638,6 +730,7 @@ enum UiCommand {
         event_id: u64,
     },
     SetWindowActiveChangeCallback(Option<WindowActivityCallback>),
+    SetWindowAppearanceChangeCallback(Option<WindowAppearanceCallback>),
     ControlClock {
         control: ClockControl,
         response: SyncSender<f64>,
@@ -685,6 +778,7 @@ async fn run_ui_commands(
             UiCommand::MinimizeWindow => {
                 window.update(cx, |_view, window, _cx| window.minimize_window())
             }
+            UiCommand::CloseWindow => window.update(cx, |_view, window, _cx| window.remove_window()),
             UiCommand::ZoomWindow => window.update(cx, |_view, window, _cx| window.zoom_window()),
             UiCommand::ToggleFullscreen => {
                 window.update(cx, |_view, window, _cx| window.toggle_fullscreen())
@@ -851,6 +945,11 @@ async fn run_ui_commands(
                         .ok();
                 })
             }
+            UiCommand::GetWindowAppearance { response } => {
+                window.update(cx, move |_view, window, _cx| {
+                    response.send(appearance_name(window.appearance())).ok();
+                })
+            }
             UiCommand::GetAutomationBounds { response } => {
                 window.update(cx, move |_view, window, cx| {
                     cx.notify();
@@ -913,6 +1012,11 @@ async fn run_ui_commands(
             UiCommand::SetWindowActiveChangeCallback(callback) => {
                 window.update(cx, move |view, window, cx| {
                     view.set_window_active_change_callback(callback, window, cx);
+                })
+            }
+            UiCommand::SetWindowAppearanceChangeCallback(callback) => {
+                window.update(cx, move |view, window, cx| {
+                    view.set_window_appearance_change_callback(callback, window, cx);
                 })
             }
             UiCommand::ControlClock { control, response } => {
@@ -1931,6 +2035,97 @@ impl GpuixRenderer {
             target_os = "freebsd"
         )))]
         Err(Error::from_reason("Unsupported operating system"))
+    }
+
+    /// Subscribe to the window's light/dark appearance. The first asynchronous
+    /// callback reports the current value; later callbacks report changes.
+    /// Vibrant variants fold into "light" and "dark". Passing null drops the
+    /// GPUI observer. Already queued callbacks may drain.
+    #[napi]
+    pub fn on_window_appearance_change(
+        &self,
+        #[napi(ts_arg_type = "((appearance: \"light\" | \"dark\") => void) | null")]
+        callback: Either<Function<'_, String, ()>, Null>,
+    ) -> Result<()> {
+        let callback = match callback {
+            Either::A(callback) => {
+                let callback = callback
+                    .build_threadsafe_function::<String>()
+                    .callee_handled::<false>()
+                    .weak::<true>()
+                    .build()?;
+                Some(Arc::new(move |appearance: &'static str| {
+                    callback.call(appearance.to_owned(), ThreadsafeFunctionCallMode::NonBlocking);
+                }) as WindowAppearanceCallback)
+            }
+            Either::B(_) => None,
+        };
+
+        #[cfg(target_os = "macos")]
+        return update_window(move |view, window, cx| {
+            view.set_window_appearance_change_callback(callback, window, cx);
+        });
+
+        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
+        return self.send_ui_command(UiCommand::SetWindowAppearanceChangeCallback(callback));
+
+        #[cfg(not(any(
+            target_os = "macos",
+            target_os = "windows",
+            target_os = "linux",
+            target_os = "freebsd"
+        )))]
+        Err(Error::from_reason("Unsupported operating system"))
+    }
+
+    /// The window's current light/dark appearance, synchronously. Use it for the
+    /// initial theme; onWindowAppearanceChange only reports changes to listeners.
+    #[napi(ts_return_type = "\"light\" | \"dark\"")]
+    pub fn get_window_appearance(&self) -> Result<String> {
+        #[cfg(target_os = "macos")]
+        return update_window(|_view, window, _cx| appearance_name(window.appearance()).to_owned());
+
+        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
+        {
+            let (response, receiver) = sync_channel(1);
+            self.send_ui_command(UiCommand::GetWindowAppearance { response })?;
+            return recv_ui_response(receiver, "the window appearance query")
+                .map(str::to_owned);
+        }
+
+        #[cfg(not(any(
+            target_os = "macos",
+            target_os = "windows",
+            target_os = "linux",
+            target_os = "freebsd"
+        )))]
+        Err(Error::from_reason(
+            "The production GPUIX renderer does not support this operating system",
+        ))
+    }
+
+    /// Close the window without consulting setWindowShouldClose, then quit like
+    /// the last window closing. Call it after the user has already decided.
+    /// Never call it synchronously inside the setWindowShouldClose handler:
+    /// GPUI is already borrowed there, so the reentrant borrow panics inside an
+    /// AppKit callback and can abort the process.
+    #[napi]
+    pub fn close_window(&self) -> Result<()> {
+        #[cfg(target_os = "macos")]
+        return update_window_without_view(|window, _cx| window.remove_window());
+
+        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
+        return self.send_ui_command(UiCommand::CloseWindow);
+
+        #[cfg(not(any(
+            target_os = "macos",
+            target_os = "windows",
+            target_os = "linux",
+            target_os = "freebsd"
+        )))]
+        Err(Error::from_reason(
+            "The production GPUIX renderer does not support this operating system",
+        ))
     }
 
     /// Bring the window forward and give it focus. This is how a window opened
@@ -3753,6 +3948,15 @@ impl Drop for GpuixRenderer {
 // ── GPUI View ────────────────────────────────────────────────────────
 
 type WindowActivityCallback = Arc<dyn Fn(bool) + Send + Sync>;
+type WindowAppearanceCallback = Arc<dyn Fn(&'static str) + Send + Sync>;
+
+/// GPUI's four appearances collapse to the two a theme can follow.
+fn appearance_name(appearance: gpui::WindowAppearance) -> &'static str {
+    match appearance {
+        gpui::WindowAppearance::Light | gpui::WindowAppearance::VibrantLight => "light",
+        gpui::WindowAppearance::Dark | gpui::WindowAppearance::VibrantDark => "dark",
+    }
+}
 
 pub(crate) struct GpuixView {
     pub(crate) tree: Arc<Mutex<RetainedTree>>,
@@ -3764,6 +3968,7 @@ pub(crate) struct GpuixView {
     pub(crate) window_selection_change: bool,
     pub(crate) window_selection_event_id: u64,
     window_activation_subscription: Option<gpui::Subscription>,
+    window_appearance_subscription: Option<gpui::Subscription>,
     /// Last identity delivered through `selectionChange`. Only written once an
     /// event is really queued, so adding the listener later still reports.
     reported_selection: Option<u64>,
@@ -4085,6 +4290,7 @@ impl GpuixView {
             window_selection_change: false,
             window_selection_event_id: 0,
             window_activation_subscription: None,
+            window_appearance_subscription: None,
             reported_selection: None,
             focus_handles: HashMap::new(),
             pending_focus_element: None,
@@ -4115,6 +4321,22 @@ impl GpuixView {
             self.window_activation_subscription = Some(cx.observe_window_activation(
                 window,
                 move |_, window, _| callback(window.is_window_active()),
+            ));
+        }
+    }
+
+    fn set_window_appearance_change_callback(
+        &mut self,
+        callback: Option<WindowAppearanceCallback>,
+        window: &mut gpui::Window,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        self.window_appearance_subscription = None;
+        if let Some(callback) = callback {
+            callback(appearance_name(window.appearance()));
+            self.window_appearance_subscription = Some(cx.observe_window_appearance(
+                window,
+                move |_, window, _| callback(appearance_name(window.appearance())),
             ));
         }
     }
