@@ -110,13 +110,15 @@ interface NativeTestRendererApi extends NativeRenderer {
 }
 
 interface NativeTestRendererConstructor {
-  new (width?: number, height?: number): NativeTestRendererApi
+  new (width?: number, height?: number, scaleFactor?: number): NativeTestRendererApi
 }
 
 /** Offscreen window size for a test renderer. Defaults to 1280x800 in native. */
 export interface TestRendererOptions {
   width?: number
   height?: number
+  /** Explicit macOS offscreen backing scale. Defaults to 1, independent of displays. */
+  scaleFactor?: number
   /** Framework scheduling boundary for events drained from native. */
   dispatchEvent?: (event: EventPayload) => void
 }
@@ -192,7 +194,7 @@ export class TestRenderer implements NativeRenderer {
         "TestGpuixRenderer is macOS and Windows only. Linux builds have no test-support because wgpu cannot read a rendered image back yet. GpuixRenderer still works on Linux."
       )
     }
-    this.native = new NativeTestRenderer(options.width, options.height)
+    this.native = new NativeTestRenderer(options.width, options.height, options.scaleFactor)
     this.applyBatch = this.native.applyBatch.bind(this.native)
     this.setQuads = this.native.setQuads.bind(this.native)
     this.focusNext = this.native.focusNext.bind(this.native)

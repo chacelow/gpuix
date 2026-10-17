@@ -275,7 +275,7 @@ export declare class GpuixRenderer {
  *   r.captureScreenshot("/tmp/test.png")  // saves rendered UI as PNG
  */
 export declare class TestGpuixRenderer {
-  constructor(width?: number | undefined | null, height?: number | undefined | null)
+  constructor(width?: number | undefined | null, height?: number | undefined | null, scaleFactor?: number | undefined | null)
   /**
    * How many elements the retained tree holds, reachable from the root or
    * not. `getTreeJson` walks from the root, so it cannot see a node that was

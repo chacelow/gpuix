@@ -112,11 +112,11 @@ fn with_test_state<R>(
 const DEFAULT_WINDOW_WIDTH: f64 = 1280.0;
 const DEFAULT_WINDOW_HEIGHT: f64 = 800.0;
 
-/// Validate a caller-supplied window dimension, falling back to `default`.
+/// Validate a caller-supplied window dimension or backing scale, falling back to `default`.
 ///
 /// Checks the value *after* the `f32` cast: a finite `f64` such as `1e300`
 /// saturates to `f32::INFINITY`, which would open a window with no usable size.
-fn window_dimension(value: Option<f64>, default: f64, label: &str) -> Result<f32> {
+fn positive_test_value(value: Option<f64>, default: f64, label: &str) -> Result<f32> {
     let Some(value) = value else {
         return Ok(default as f32);
     };
@@ -212,11 +212,12 @@ pub struct TestGpuixRenderer {
 #[napi]
 impl TestGpuixRenderer {
     #[napi(constructor)]
-    pub fn new(width: Option<f64>, height: Option<f64>) -> Result<Self> {
+    pub fn new(width: Option<f64>, height: Option<f64>, scale_factor: Option<f64>) -> Result<Self> {
         let window_size = gpui::size(
-            gpui::px(window_dimension(width, DEFAULT_WINDOW_WIDTH, "width")?),
-            gpui::px(window_dimension(height, DEFAULT_WINDOW_HEIGHT, "height")?),
+            gpui::px(positive_test_value(width, DEFAULT_WINDOW_WIDTH, "width")?),
+            gpui::px(positive_test_value(height, DEFAULT_WINDOW_HEIGHT, "height")?),
         );
+        let scale_factor = positive_test_value(scale_factor, 1.0, "scaleFactor")?;
         let tree = Arc::new(Mutex::new(RetainedTree::new()));
         let events: Arc<Mutex<Vec<EventPayload>>> = Arc::new(Mutex::new(Vec::new()));
 
@@ -241,7 +242,7 @@ impl TestGpuixRenderer {
         // Open an offscreen window at (-10000, -10000) with the same GpuixView
         // and native GPU renderer as production.
         let window_handle = cx
-            .open_offscreen_window(window_size, |_window, app| {
+            .open_offscreen_window(window_size, scale_factor, |_window, app| {
                 app.new(|_cx| {
                     GpuixView::new(
                         tree_clone,
