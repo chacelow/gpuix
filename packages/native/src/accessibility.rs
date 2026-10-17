@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 
+use gpui::accesskit::Toggled;
 use gpui::prelude::*;
 use gpui::{AccessibleAction, Role};
 
@@ -53,6 +54,9 @@ where
     }
     if let Some(selected) = bool_prop(props, "aria-selected") {
         el = el.aria_selected(selected);
+    }
+    if let Some(toggled) = toggled_prop(props) {
+        el = el.aria_toggled(toggled);
     }
     if let Some(level) = usize_prop(props, "aria-level") {
         el = el.aria_level(level);
@@ -115,6 +119,24 @@ fn string_prop(props: &HashMap<String, serde_json::Value>, key: &str) -> Option<
 
 fn bool_prop(props: &HashMap<String, serde_json::Value>, key: &str) -> Option<bool> {
     props.get(key).and_then(|value| value.as_bool())
+}
+
+// aria-checked takes precedence when both states are supplied. Booleans use
+// bool_prop's parsing policy; only the additional ARIA token "mixed" is accepted.
+fn toggled_prop(props: &HashMap<String, serde_json::Value>) -> Option<Toggled> {
+    let key = if props.contains_key("aria-checked") {
+        "aria-checked"
+    } else {
+        "aria-pressed"
+    };
+    match bool_prop(props, key) {
+        Some(true) => Some(Toggled::True),
+        Some(false) => Some(Toggled::False),
+        None if props.get(key).and_then(|value| value.as_str()) == Some("mixed") => {
+            Some(Toggled::Mixed)
+        }
+        None => None,
+    }
 }
 
 fn usize_prop(props: &HashMap<String, serde_json::Value>, key: &str) -> Option<usize> {
@@ -214,8 +236,11 @@ fn role_from_aria(token: &str) -> Option<Role> {
 
 #[cfg(test)]
 mod tests {
-    use super::role_from_aria;
+    use super::{role_from_aria, toggled_prop};
+    use gpui::accesskit::Toggled;
     use gpui::Role;
+    use serde_json::json;
+    use std::collections::HashMap;
 
     #[test]
     fn maps_common_aria_tokens() {
@@ -228,5 +253,55 @@ mod tests {
         assert_eq!(role_from_aria("presentation"), Some(Role::GenericContainer));
         assert_eq!(role_from_aria("Button"), None);
         assert_eq!(role_from_aria("not-a-role"), None);
+    }
+
+    #[test]
+    fn toggled_boolean_and_mixed_states() {
+        for key in ["aria-pressed", "aria-checked"] {
+            for (value, expected) in [
+                (json!(true), Toggled::True),
+                (json!(false), Toggled::False),
+                (json!("mixed"), Toggled::Mixed),
+            ] {
+                let props = HashMap::from([(key.to_string(), value)]);
+                assert_eq!(toggled_prop(&props), Some(expected), "{key}");
+            }
+            for invalid in [json!("true"), json!("false"), json!(null), json!(1)] {
+                assert_eq!(
+                    toggled_prop(&HashMap::from([(key.to_string(), invalid)])),
+                    None
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn checked_overrides_pressed() {
+        for value in [json!(true), json!(false), json!("mixed"), json!(null)] {
+            let checked = HashMap::from([("aria-checked".to_string(), value.clone())]);
+            let both = HashMap::from([
+                ("aria-checked".to_string(), value),
+                ("aria-pressed".to_string(), json!(true)),
+            ]);
+            assert_eq!(toggled_prop(&both), toggled_prop(&checked));
+        }
+    }
+
+    #[test]
+    fn absent_state_has_no_toggled() {
+        assert_eq!(toggled_prop(&HashMap::new()), None);
+    }
+
+    #[test]
+    fn deleting_state_clears_toggled_and_restores_pressed_fallback() {
+        let mut props = HashMap::from([
+            ("aria-checked".to_string(), json!("mixed")),
+            ("aria-pressed".to_string(), json!(false)),
+        ]);
+        assert_eq!(toggled_prop(&props), Some(Toggled::Mixed));
+        props.remove("aria-checked");
+        assert_eq!(toggled_prop(&props), Some(Toggled::False));
+        props.remove("aria-pressed");
+        assert_eq!(toggled_prop(&props), None);
     }
 }

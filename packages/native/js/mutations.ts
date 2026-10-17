@@ -147,6 +147,8 @@ export const UNIVERSAL_PROPS: ReadonlySet<string> = new Set([
   "aria-id",
   "aria-expanded",
   "aria-selected",
+  "aria-pressed",
+  "aria-checked",
   "aria-valuetext",
   "aria-level",
 ])

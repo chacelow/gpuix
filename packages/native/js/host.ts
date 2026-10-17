@@ -512,6 +512,9 @@ export interface HostProps {
   "aria-id"?: string
   "aria-expanded"?: boolean
   "aria-selected"?: boolean
+  /** Toggle state; aria-checked takes precedence over aria-pressed. */
+  "aria-pressed"?: boolean | "mixed"
+  "aria-checked"?: boolean | "mixed"
   /** String value reported to assistive technology. */
   "aria-valuetext"?: string
   /** Heading level, 1-based. */
@@ -552,6 +555,8 @@ export type VirtualListShared = {
   "aria-id"?: string
   "aria-expanded"?: boolean
   "aria-selected"?: boolean
+  "aria-pressed"?: boolean | "mixed"
+  "aria-checked"?: boolean | "mixed"
   "aria-valuetext"?: string
   "aria-level"?: number
   testId?: string
