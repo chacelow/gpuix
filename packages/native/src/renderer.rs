@@ -163,6 +163,56 @@ mod animation_frame_tests {
     }
 }
 
+#[cfg(test)]
+mod window_activation_tests {
+    use super::*;
+
+    #[gpui::test]
+    fn window_activity_reports_baseline_and_transitions_until_unsubscribed(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let window = cx.add_window(|_, _| {
+            GpuixView::new(
+                Arc::new(Mutex::new(RetainedTree::new())),
+                None,
+                "activity regression".into(),
+                SharedSelection::default(),
+            )
+        });
+        gpui::VisualTestContext::from_window(window.into(), cx).deactivate_window();
+        let changes = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let callback_changes = changes.clone();
+        let callback: WindowActivityCallback = Arc::new(move |active| {
+            callback_changes.lock().push(active);
+        });
+        window
+            .update(cx, |view, window, cx| {
+                view.set_window_active_change_callback(Some(callback), window, cx);
+            })
+            .unwrap();
+        assert_eq!(*changes.lock(), vec![false]);
+
+        window
+            .update(cx, |_, window, _| window.activate_window())
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(*changes.lock(), vec![false, true]);
+        gpui::VisualTestContext::from_window(window.into(), cx).deactivate_window();
+        assert_eq!(*changes.lock(), vec![false, true, false]);
+
+        window
+            .update(cx, |view, window, cx| {
+                view.set_window_active_change_callback(None, window, cx);
+            })
+            .unwrap();
+        window
+            .update(cx, |_, window, _| window.activate_window())
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(*changes.lock(), vec![false, true, false]);
+    }
+}
+
 /// Parse a CSS font-weight value (string or number) into a GPUI FontWeight.
 /// Accepts named keywords ("bold", "semibold"), numeric strings ("700"),
 /// and raw numbers (700). Falls back to 400 (normal) for unrecognized values.
@@ -587,6 +637,7 @@ enum UiCommand {
         enabled: bool,
         event_id: u64,
     },
+    SetWindowActiveChangeCallback(Option<WindowActivityCallback>),
     ControlClock {
         control: ClockControl,
         response: SyncSender<f64>,
@@ -857,6 +908,11 @@ async fn run_ui_commands(
                     view.set_selection_change_listener(enabled, event_id);
                     cx.notify();
                     window.refresh();
+                })
+            }
+            UiCommand::SetWindowActiveChangeCallback(callback) => {
+                window.update(cx, move |view, window, cx| {
+                    view.set_window_active_change_callback(callback, window, cx);
                 })
             }
             UiCommand::ControlClock { control, response } => {
@@ -1833,6 +1889,48 @@ impl GpuixRenderer {
             update_window_without_view(|window, _cx| schedule_animation_frame(window))?;
         }
         Ok(())
+    }
+
+    /// Subscribe to native window activation. The first asynchronous callback
+    /// reports current state; later callbacks report activation changes.
+    /// Passing null drops the GPUI observer. Already queued callbacks may drain.
+    #[napi]
+    pub fn on_window_active_change(
+        &self,
+        #[napi(ts_arg_type = "((active: boolean) => void) | null")] callback: Either<
+            Function<'_, bool, ()>,
+            Null,
+        >,
+    ) -> Result<()> {
+        let callback = match callback {
+            Either::A(callback) => {
+                let callback = callback
+                    .build_threadsafe_function::<bool>()
+                    .callee_handled::<false>()
+                    .weak::<true>()
+                    .build()?;
+                Some(Arc::new(move |active| {
+                    callback.call(active, ThreadsafeFunctionCallMode::NonBlocking);
+                }) as WindowActivityCallback)
+            }
+            Either::B(_) => None,
+        };
+
+        #[cfg(target_os = "macos")]
+        return update_window(move |view, window, cx| {
+            view.set_window_active_change_callback(callback, window, cx);
+        });
+
+        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
+        return self.send_ui_command(UiCommand::SetWindowActiveChangeCallback(callback));
+
+        #[cfg(not(any(
+            target_os = "macos",
+            target_os = "windows",
+            target_os = "linux",
+            target_os = "freebsd"
+        )))]
+        Err(Error::from_reason("Unsupported operating system"))
     }
 
     /// Bring the window forward and give it focus. This is how a window opened
@@ -3654,6 +3752,8 @@ impl Drop for GpuixRenderer {
 
 // ── GPUI View ────────────────────────────────────────────────────────
 
+type WindowActivityCallback = Arc<dyn Fn(bool) + Send + Sync>;
+
 pub(crate) struct GpuixView {
     pub(crate) tree: Arc<Mutex<RetainedTree>>,
     pub(crate) event_callback: Option<EventCallback>,
@@ -3663,6 +3763,7 @@ pub(crate) struct GpuixView {
     pub(crate) window_key_event_id: u64,
     pub(crate) window_selection_change: bool,
     pub(crate) window_selection_event_id: u64,
+    window_activation_subscription: Option<gpui::Subscription>,
     /// Last identity delivered through `selectionChange`. Only written once an
     /// event is really queued, so adding the listener later still reports.
     reported_selection: Option<u64>,
@@ -3983,6 +4084,7 @@ impl GpuixView {
             window_key_event_id: 0,
             window_selection_change: false,
             window_selection_event_id: 0,
+            window_activation_subscription: None,
             reported_selection: None,
             focus_handles: HashMap::new(),
             pending_focus_element: None,
@@ -3998,6 +4100,22 @@ impl GpuixView {
             clock: crate::automation::AutomationClock::new(),
             highlights: HashMap::new(),
             paint_reports: SharedPaintReports::default(),
+        }
+    }
+
+    fn set_window_active_change_callback(
+        &mut self,
+        callback: Option<WindowActivityCallback>,
+        window: &mut gpui::Window,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        self.window_activation_subscription = None;
+        if let Some(callback) = callback {
+            callback(window.is_window_active());
+            self.window_activation_subscription = Some(cx.observe_window_activation(
+                window,
+                move |_, window, _| callback(window.is_window_active()),
+            ));
         }
     }
 

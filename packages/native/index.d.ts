@@ -105,6 +105,12 @@ export declare class GpuixRenderer {
    */
   setAnimationFrameActive(active: boolean): void
   /**
+   * Subscribe to native window activation. The first asynchronous callback
+   * reports current state; later callbacks report activation changes.
+   * Passing null drops the GPUI observer. Already queued callbacks may drain.
+   */
+  onWindowActiveChange(callback: ((active: boolean) => void) | null): void
+  /**
    * Bring the window forward and give it focus. This is how a window opened
    * with `show: false` or `focus: false` is revealed later.
    */

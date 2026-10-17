@@ -689,6 +689,7 @@ export type NativeRenderer = MutationHost &
       | "setWindowSelectionChange"
       | "setAnimationFrameCallback"
       | "setAnimationFrameActive"
+      | "onWindowActiveChange"
       | "getElementBounds"
       | "getElementsAt"
       | "scrollTo"
