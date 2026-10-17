@@ -417,16 +417,13 @@ export interface HighlightSpec {
 // Element IDs are auto-generated numeric IDs (not user-settable).
 // Framework adapters add their own children, key, and ref fields.
 export interface HostProps {
-  /** Native-only pointer-driven resize; moves bypass JavaScript. */
   nativeResize?: {
     axis: "x" | "y"
-    target: number
-    property: "width" | "height"
-    sign: 1 | -1
     min: number
     max: number
+    targets: readonly { id: number; property: "left" | "top" | "width" | "height"; base: number; factor: number }[]
   }
-  /** Sent once when native divider resizing ends or is cancelled. */
+  onResizeMove?: (event: EventPayload) => void
   onResizeEnd?: (event: EventPayload) => void
   style?: StyleDesc
 

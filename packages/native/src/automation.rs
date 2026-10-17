@@ -394,9 +394,12 @@ pub fn dispatch_mouse_move(
     pressed_button: Option<u32>,
     modifiers: Modifiers,
 ) {
+    let position = point(px(x as f32), px(y as f32));
+    let delta = position - window.mouse_position();
     window.dispatch_event(
         MouseMoveEvent {
-            position: point(px(x as f32), px(y as f32)),
+            position,
+            delta,
             pressed_button: pressed_button.map(mouse_button),
             modifiers,
         }

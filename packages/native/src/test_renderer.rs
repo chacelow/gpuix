@@ -475,17 +475,21 @@ impl TestGpuixRenderer {
         let modifiers = crate::automation::parse_modifiers(modifiers.as_deref());
         with_test_state(|cx, window, _view| {
             let button: Option<gpui::MouseButton> = pressed_button.map(u32_to_mouse_button);
-
+            let previous = cx
+                .update_window(window, |_, window, _| window.mouse_position())
+                .map_err(|error| Error::from_reason(error.to_string()))?;
+            let position = gpui::point(gpui::px(x as f32), gpui::px(y as f32));
+            let delta = position - previous;
             simulate_event_with_view_lease(
                 cx,
                 window,
                 gpui::MouseMoveEvent {
-                    position: gpui::point(gpui::px(x as f32), gpui::px(y as f32)),
+                    position,
+                    delta,
                     modifiers,
                     pressed_button: button,
                 },
             );
-
             Ok(())
         })
     }
@@ -1349,49 +1353,44 @@ mod windows_scale_tests {
         renderer.dispose();
     }
     #[test]
-    fn native_resize_moves_change_retained_size_without_move_events() {
+    fn native_resize_moves_change_multiple_retained_styles_without_move_events() {
         let renderer = TestGpuixRenderer::new(Some(400.0), Some(200.0), None).unwrap();
         renderer.apply_batch(
             r#"[
                 ["createElement",1,"div"],["createElement",2,"div"],["createElement",3,"div"],["createElement",4,"div"],
                 ["appendChild",1,2],["appendChild",1,3],["appendChild",1,4],
                 ["setStyle",1,{"display":"flex","width":400,"height":200}],
-                ["setStyle",2,{"width":100,"height":200}],
+                ["setStyle",2,{"position":"absolute","left":0,"width":100,"height":200}],
                 ["setStyle",3,{"width":10,"height":200}],
-                ["setStyle",4,{"width":290,"height":200}],
-                ["setCustomProp",3,"nativeResize",{"axis":"x","target":2,"property":"width","sign":1,"min":40,"max":300}],
+                ["setStyle",4,{"position":"absolute","left":110,"width":290,"height":200}],
+                ["setCustomProp",3,"nativeResize",{"axis":"x","min":-60,"max":100,"targets":[{"id":2,"property":"width","base":100,"factor":1},{"id":4,"property":"left","base":110,"factor":1},{"id":4,"property":"width","base":290,"factor":-1}]}],
                 ["setEventListener",3,"resizeEnd",true],["setRoot",1]
             ]"#.to_string(),
         ).unwrap();
         renderer.flush().unwrap();
-        let initial = renderer.get_element_bounds(2.0).unwrap().unwrap().width;
         renderer.simulate_mouse_down(105.0, 40.0, None, None).unwrap();
         renderer.simulate_mouse_move(125.0, 40.0, Some(0), None).unwrap();
         renderer.flush().unwrap();
-        assert_eq!(renderer.get_element_bounds(2.0).unwrap().unwrap().width, initial + 20.0);
-        assert!(renderer.drain_events().is_empty(), "pointer moves must not emit JS events");
-        renderer.simulate_mouse_move(145.0, 40.0, Some(0), None).unwrap();
-        renderer.flush().unwrap();
-        assert_eq!(renderer.get_element_bounds(2.0).unwrap().unwrap().width, initial + 40.0);
-        assert!(renderer.drain_events().is_empty(), "each native move must remain JS-silent");
-        renderer.simulate_mouse_up(145.0, 40.0, None, None).unwrap();
+        assert_eq!(renderer.get_element_bounds(2.0).unwrap().unwrap().width, 120.0);
+        assert_eq!(renderer.get_element_bounds(4.0).unwrap().unwrap().x, 130.0);
+        assert_eq!(renderer.get_element_bounds(4.0).unwrap().unwrap().width, 270.0);
+        assert!(renderer.drain_events().is_empty());
+        renderer.simulate_mouse_up(125.0, 40.0, None, None).unwrap();
         let events = renderer.drain_events();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event_type, "resizeEnd");
-        assert_eq!(events[0].size, Some(initial + 40.0));
+        assert_eq!(events[0].delta, Some(20.0));
         assert_eq!(events[0].cancelled, Some(false));
-
-        renderer.simulate_mouse_down(145.0, 40.0, None, None).unwrap();
-        renderer.simulate_mouse_move(165.0, 40.0, Some(0), None).unwrap();
+        renderer.simulate_mouse_down(125.0, 40.0, None, None).unwrap();
+        renderer.simulate_mouse_move(145.0, 40.0, Some(0), None).unwrap();
         renderer.flush().unwrap();
-        assert_eq!(renderer.get_element_bounds(2.0).unwrap().unwrap().width, initial + 60.0);
         renderer.simulate_key_down("escape".to_string(), None).unwrap();
         renderer.flush().unwrap();
-        assert_eq!(renderer.get_element_bounds(2.0).unwrap().unwrap().width, initial + 40.0);
+        assert_eq!(renderer.get_element_bounds(2.0).unwrap().unwrap().width, 120.0);
         let cancelled = renderer.drain_events();
         assert_eq!(cancelled.len(), 1);
         assert_eq!(cancelled[0].event_type, "resizeEnd");
-        assert_eq!(cancelled[0].size, Some(initial + 40.0));
+        assert_eq!(cancelled[0].delta, Some(0.0));
         assert_eq!(cancelled[0].cancelled, Some(true));
         renderer.dispose();
     }

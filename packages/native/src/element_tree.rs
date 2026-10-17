@@ -32,6 +32,12 @@ pub struct EventPayload {
     pub x: Option<f64>,
     /// Mouse Y position in window coordinates (pixels).
     pub y: Option<f64>,
+    /// Mouse movement since the previous move event in pixels.
+    /// Populated for: mouseMove.
+    pub movement_x: Option<f64>,
+    /// Mouse movement since the previous move event in pixels.
+    /// Populated for: mouseMove.
+    pub movement_y: Option<f64>,
 
     // ── Mouse button ─────────────────────────────────────────────────
     /// Which mouse button: 0=left, 1=middle, 2=right.
@@ -119,6 +125,8 @@ pub struct EventPayload {
     pub height: Option<f64>,
     /// Resized dimension, populated for native resize events.
     pub size: Option<f64>,
+    /// Pointer delta from the press position, populated for native resize events.
+    pub delta: Option<f64>,
     /// Whether a native resize ended by cancellation.
     pub cancelled: Option<bool>,
 
@@ -152,6 +160,8 @@ impl Default for EventPayload {
             event_type: String::new(),
             x: None,
             y: None,
+            movement_x: None,
+            movement_y: None,
             button: None,
             click_count: None,
             is_right_click: None,
@@ -172,6 +182,7 @@ impl Default for EventPayload {
             end_index: None,
             width: None,
             size: None,
+            delta: None,
             cancelled: None,
             height: None,
             scroll_x: None,

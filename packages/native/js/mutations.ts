@@ -95,6 +95,7 @@ export const EVENT_PROPS = [
   ["onMotionComplete", "motionComplete"],
   ["onChange", "change"],
   ["onSubmit", "submit"],
+  ["onResizeMove", "resizeMove"],
   ["onResizeEnd", "resizeEnd"],
   ["onClick", "click"],
   ["onAuxClick", "auxClick"],
