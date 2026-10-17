@@ -21,6 +21,8 @@ import {
   type TreeNode,
 } from "./protocol.js"
 
+type FrameStats = ResultOf<"getFrameStats">
+
 function importNodeModule<T>(specifier: string): Promise<T> {
   return import(specifier)
 }
@@ -113,6 +115,8 @@ export interface TestAutomationRenderer {
   clockFastForward(deltaMs: number): number
   clockResume(): number
   focusElement?(elementId: number): void
+  getFrameStats?(): FrameStats
+  resetFrameStats?(): void
   blur?(): void
 }
 
@@ -258,6 +262,19 @@ export class InProcessBackend extends ValidatedAutomationBackend {
       nowMs: this.renderer.clockFastForward(params.deltaMs),
     }),
     clockResume: () => ({ nowMs: this.renderer.clockResume() }),
+    getFrameStats: () => {
+      if (!this.renderer.getFrameStats) {
+        throw new AutomationError("Unsupported", "frame stats need the live native renderer")
+      }
+      return this.renderer.getFrameStats()
+    },
+    resetFrameStats: () => {
+      if (!this.renderer.resetFrameStats) {
+        throw new AutomationError("Unsupported", "frame stats need the live native renderer")
+      }
+      this.renderer.resetFrameStats()
+      return { ok: true as const }
+    },
   }
 }
 
@@ -753,6 +770,8 @@ export interface LiveAutomationRenderer {
   clockSet(nowMs: number): number
   clockFastForward(deltaMs: number): number
   clockResume(): number
+  getDebugFrameOverlayStats?(): FrameStats
+  resetDebugFrameOverlayStats?(): void
 }
 
 export function liveRendererAsTest(
@@ -839,6 +858,12 @@ export function liveRendererAsTest(
     clockResume: () => renderer.clockResume(),
     focusElement: (id) => renderer.focusElement(id),
     blur: () => renderer.blur(),
+    getFrameStats: renderer.getDebugFrameOverlayStats
+      ? () => renderer.getDebugFrameOverlayStats!()
+      : undefined,
+    resetFrameStats: renderer.resetDebugFrameOverlayStats
+      ? () => renderer.resetDebugFrameOverlayStats!()
+      : undefined,
   }
 }
 

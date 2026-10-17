@@ -235,6 +235,23 @@ export const methods = {
     params: z.object({}),
     result: z.object({ nowMs: z.number() }),
   },
+  /** GPUI draw durations of the last 1000 frames plus Windows present count. */
+  getFrameStats: {
+    params: z.object({}),
+    result: z.object({
+      currentMs: z.number().optional(),
+      p90Ms: z.number().optional(),
+      p99Ms: z.number().optional(),
+      maxMs: z.number().optional(),
+      frames: z.number(),
+      successfulPresents: z.number().optional(),
+      samples: z.number(),
+    }),
+  },
+  resetFrameStats: {
+    params: z.object({}),
+    result: okSchema,
+  },
 } as const
 
 export type MethodName = keyof typeof methods
