@@ -1074,10 +1074,8 @@ enum UiCommand {
     WindowsSetCloseHandler(windows_bridge::CloseHandler),
     #[cfg(target_os = "windows")]
     WindowsCloseComplete { token: windows_protocol::Token, allow: bool },
-    #[cfg(target_os = "windows")]
-    WindowsHideCursor,
-    #[cfg(target_os = "windows")]
-    WindowsRestoreCursor { x: i32, y: i32 },
+    BeginRelativeDrag,
+    EndRelativeDrag(Option<(f32, f32)>),
     #[cfg(target_os = "windows")]
     WindowsShutdownBridge,
     ActivateWindow,
@@ -1233,13 +1231,13 @@ async fn run_ui_commands(
             UiCommand::WindowsCloseComplete { token, allow } => window.update(cx, |_, window, _| {
                 windows_bridge::complete_close(token, allow, window);
             }),
-            #[cfg(target_os = "windows")]
-            UiCommand::WindowsHideCursor => window.update(cx, |_, window, _| {
-                windows_bridge::hide_cursor(window);
+            UiCommand::BeginRelativeDrag => window.update(cx, |_, window, _| {
+                if window.is_window_active() {
+                    window.begin_relative_pointer();
+                }
             }),
-            #[cfg(target_os = "windows")]
-            UiCommand::WindowsRestoreCursor { x, y } => window.update(cx, |_, _, _| {
-                windows_bridge::restore_cursor(x, y);
+            UiCommand::EndRelativeDrag(point) => window.update(cx, move |_, window, _| {
+                window.end_relative_pointer(point.map(|(x, y)| gpui::point(gpui::px(x), gpui::px(y))));
             }),
             #[cfg(target_os = "windows")]
             UiCommand::WindowsShutdownBridge => {
@@ -2697,31 +2695,53 @@ impl GpuixRenderer {
         }
     }
 
-    /// Windows UI-thread persistent cursor hide. Unsupported on other platforms.
+    /// Hide and pin the cursor; mouse events then report accumulated relative motion.
     #[napi]
-    pub fn hide_cursor_for_drag(&self) -> Result<()> {
-        #[cfg(target_os = "windows")]
-        return self.send_ui_command(UiCommand::WindowsHideCursor);
-        #[cfg(not(target_os = "windows"))]
-        Err(Error::from_reason("Persistent renderer cursor hiding is only supported on Windows"))
+    pub fn begin_relative_drag(&self) -> Result<()> {
+        #[cfg(target_os = "macos")]
+        return update_window(|_view, window, _cx| {
+            if window.is_window_active() {
+                window.begin_relative_pointer();
+            }
+        });
+        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
+        return self.send_ui_command(UiCommand::BeginRelativeDrag);
+        #[cfg(not(any(
+            target_os = "macos",
+            target_os = "windows",
+            target_os = "linux",
+            target_os = "freebsd"
+        )))]
+        Err(Error::from_reason(
+            "The production GPUIX renderer does not support this operating system",
+        ))
     }
 
-    /// Windows physical virtual-desktop pixels; unsupported on other platforms.
+    /// End a relative drag, optionally moving the cursor to a window point first.
     #[napi]
-    pub fn restore_cursor_after_drag(&self, x: f64, y: f64) -> Result<()> {
-        #[cfg(target_os = "windows")]
+    pub fn end_relative_drag(&self, x: Option<f64>, y: Option<f64>) -> Result<()> {
+        let point = match (x, y) {
+            (Some(x), Some(y)) if x.is_finite() && y.is_finite() => Some((x as f32, y as f32)),
+            (None, None) => None,
+            _ => return Err(Error::from_reason("endRelativeDrag needs both finite coordinates or neither")),
+        };
+        #[cfg(target_os = "macos")]
+        return update_window(move |_view, window, _cx| {
+            window.end_relative_pointer(point.map(|(x, y)| gpui::point(gpui::px(x), gpui::px(y))));
+        });
+        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
+        return self.send_ui_command(UiCommand::EndRelativeDrag(point));
+        #[cfg(not(any(
+            target_os = "macos",
+            target_os = "windows",
+            target_os = "linux",
+            target_os = "freebsd"
+        )))]
         {
-            if !x.is_finite() || !y.is_finite()
-                || x.round() < i32::MIN as f64 || x.round() > i32::MAX as f64
-                || y.round() < i32::MIN as f64 || y.round() > i32::MAX as f64 {
-                return Err(Error::from_reason("Cursor coordinates must be finite signed 32-bit physical pixels"));
-            }
-            return self.send_ui_command(UiCommand::WindowsRestoreCursor { x: x.round() as i32, y: y.round() as i32 });
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            let _ = (x, y);
-            Err(Error::from_reason("Physical renderer cursor restoration is only supported on Windows"))
+            let _ = point;
+            Err(Error::from_reason(
+                "The production GPUIX renderer does not support this operating system",
+            ))
         }
     }
 

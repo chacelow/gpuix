@@ -112,10 +112,10 @@ export declare class GpuixRenderer {
    * nonblockingly until JavaScript returns. Registration samples a baseline.
    */
   setResumeFrameCallback(callback: ((timestampMs: number) => void) | null): void
-  /** Windows UI-thread persistent cursor hide. Unsupported on other platforms. */
-  hideCursorForDrag(): void
-  /** Windows physical virtual-desktop pixels; unsupported on other platforms. */
-  restoreCursorAfterDrag(x: number, y: number): void
+  /** Hide and pin the cursor; mouse events then report accumulated relative motion. */
+  beginRelativeDrag(): void
+  /** End a relative drag, optionally moving the cursor to a window point first. */
+  endRelativeDrag(x?: number | undefined | null, y?: number | undefined | null): void
   /**
    * Subscribe to native window activation. The first asynchronous callback
    * reports current state; later callbacks report activation changes.

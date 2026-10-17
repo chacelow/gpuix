@@ -1,4 +1,4 @@
-use super::windows_protocol::{CloseProtocol, CursorCounter, FrameKind, FrameProtocol, FrameTicket, Token};
+use super::windows_protocol::{CloseProtocol, FrameKind, FrameProtocol, FrameTicket, Token};
 use super::{GpuixView, UiCommand};
 use futures::channel::mpsc;
 use napi::bindgen_prelude::*;
@@ -11,7 +11,7 @@ use parking_lot::Mutex;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::time::Instant;
 use windows::Win32::Foundation::HWND;
-use windows::Win32::UI::WindowsAndMessaging::{IsIconic, IsWindowVisible, SetPhysicalCursorPos, ShowCursor};
+use windows::Win32::UI::WindowsAndMessaging::{IsIconic, IsWindowVisible};
 
 #[derive(Default)]
 pub(super) struct Owner {
@@ -98,25 +98,6 @@ pub(super) fn close_handler(
     Ok(CloseHandler { generation: 0, callback })
 }
 
-#[derive(Default)]
-struct HiddenCursor {
-    counter: CursorCounter,
-}
-
-impl HiddenCursor {
-    fn hide(&mut self) {
-        self.counter.hide(|visible| unsafe { ShowCursor(visible) });
-    }
-
-    fn restore(&mut self) {
-        self.counter.restore(|visible| unsafe { ShowCursor(visible) });
-    }
-}
-
-impl Drop for HiddenCursor {
-    fn drop(&mut self) { self.restore(); }
-}
-
 struct Bridge {
     owner: Arc<Owner>,
     animation: Option<FrameHandler>,
@@ -128,7 +109,6 @@ struct Bridge {
     last_resume_generation: u64,
     last_active: bool,
     last_visible: bool,
-    cursor: HiddenCursor,
     activation: Option<gpui::Subscription>,
 }
 
@@ -152,7 +132,6 @@ impl Bridge {
         self.last_resume_generation = generation;
         self.last_active = active;
         self.last_visible = visible;
-        if !active { self.cursor.restore(); }
     }
 
     fn dispatch(&mut self, kind: FrameKind) {
@@ -208,7 +187,6 @@ pub(super) fn install(
         last_resume_generation: window.resume_generation(),
         last_active: window.is_window_active(),
         last_visible: visible(window),
-        cursor: HiddenCursor::default(),
         activation: Some(activation),
     }));
     BRIDGE.with(|stored| *stored.borrow_mut() = Some(value));
@@ -325,19 +303,6 @@ pub(super) fn complete_close(token: Token, allow: bool, window: &mut gpui::Windo
     }
 }
 
-pub(super) fn hide_cursor(window: &gpui::Window) {
-    if window.is_window_active() {
-        if let Some(bridge) = bridge() { bridge.borrow_mut().cursor.hide(); }
-    }
-}
-
-pub(super) fn restore_cursor(x: i32, y: i32) {
-    if let Err(error) = unsafe { SetPhysicalCursorPos(x, y) } {
-        log::error!("Restoring drag cursor position failed: {error}");
-    }
-    if let Some(bridge) = bridge() { bridge.borrow_mut().cursor.restore(); }
-}
-
 pub(super) fn shutdown(window: &mut gpui::Window) {
     clear();
     window.on_before_present(None);
@@ -353,7 +318,6 @@ pub(super) fn clear() {
             bridge.resume = None;
             bridge.close = None;
             bridge.activation = None;
-            bridge.cursor.restore();
         }
     });
 }

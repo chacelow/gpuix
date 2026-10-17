@@ -189,26 +189,6 @@ impl CloseProtocol {
     }
 }
 
-#[derive(Default)]
-pub(super) struct CursorCounter {
-    decrements: u32,
-}
-
-impl CursorCounter {
-    pub fn hide(&mut self, mut show: impl FnMut(bool) -> i32) {
-        if self.decrements != 0 { return; }
-        loop {
-            let count = show(false);
-            self.decrements += 1;
-            if count < 0 { break; }
-        }
-    }
-
-    pub fn restore(&mut self, mut show: impl FnMut(bool) -> i32) {
-        for _ in 0..std::mem::take(&mut self.decrements) { show(true); }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -291,26 +271,5 @@ mod tests {
         let allowed = state.begin().unwrap();
         assert!(state.complete(allowed, true));
         assert!(!state.complete(allowed, true));
-    }
-
-    #[test]
-    fn cursor_hide_is_idempotent_and_restores_only_owned_decrements() {
-        for initial in [-2, 0, 3] {
-            let mut counter = CursorCounter::default();
-            let count = std::cell::Cell::new(initial);
-            let mut show = |visible: bool| {
-                count.set(count.get() + if visible { 1 } else { -1 });
-                count.get()
-            };
-            counter.hide(&mut show);
-            let hidden = count.get();
-            assert!(hidden < 0);
-            counter.hide(&mut show);
-            assert_eq!(count.get(), hidden);
-            counter.restore(&mut show);
-            counter.restore(&mut show);
-            assert_eq!(count.get(), initial);
-            assert_eq!(counter.decrements, 0);
-        }
     }
 }
