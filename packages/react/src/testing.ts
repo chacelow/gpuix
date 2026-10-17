@@ -27,6 +27,7 @@ export function createTestRoot(options: TestWindowOptions = {}): TestRoot {
   })
   const root = createRoot(renderer, {
     onKeyDown: options.onKeyDown,
+    onEvent: options.onEvent,
     onKeyUp: options.onKeyUp,
     onSelectionChange: options.onSelectionChange,
     tabNavigation: options.tabNavigation,

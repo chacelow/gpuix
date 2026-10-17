@@ -22,7 +22,7 @@ import type {
   ImagePixelFormat,
   NativeRenderer,
   PathPromptOptions,
-  WindowKeyEventHandlers,
+  RootEventHandlers,
 } from "./host.js"
 import { createRendererState } from "./renderer-state.js"
 export {
@@ -124,7 +124,7 @@ export interface TestRendererOptions {
   dispatchEvent?: (event: EventPayload) => void
 }
 
-export type TestWindowOptions = TestRendererOptions & WindowKeyEventHandlers
+export type TestWindowOptions = TestRendererOptions & RootEventHandlers
 
 // The Linux stub has no test methods; the native availability check guards the full API.
 function hasNativeTestRendererClass(
