@@ -16,6 +16,7 @@ mod accessibility;
 mod app_menu;
 mod automation;
 mod color;
+mod context_menu;
 mod custom_elements;
 mod diff;
 mod element_tree;

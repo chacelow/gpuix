@@ -4004,6 +4004,7 @@ pub(crate) struct GpuixView {
     /// What `onLayout` and `onScrollChange` last reported, for the elements that
     /// have the listener. Shared with the paint closures that compare against it.
     paint_reports: SharedPaintReports,
+    context_menus: crate::context_menu::ContextMenus,
 }
 
 #[derive(Default)]
@@ -4306,6 +4307,7 @@ impl GpuixView {
             clock: crate::automation::AutomationClock::new(),
             highlights: HashMap::new(),
             paint_reports: SharedPaintReports::default(),
+            context_menus: crate::context_menu::ContextMenus::default(),
         }
     }
 
@@ -4574,6 +4576,7 @@ impl GpuixView {
             inherited,
             highlights: &mut self.highlights,
             paint_reports: &self.paint_reports,
+            context_menus: &self.context_menus,
             highlight_events: &mut highlight_events,
             keyboard_focus,
         };
@@ -4700,6 +4703,7 @@ pub(crate) struct BuildCtx<'a> {
     /// Persistent `highlight` caches, keyed by the declaring element.
     highlights: &'a mut HashMap<u64, HighlightCacheEntry>,
     paint_reports: &'a SharedPaintReports,
+    context_menus: &'a crate::context_menu::ContextMenus,
     /// `onHighlight` payloads queued during the build.
     ///
     /// Never emitted inline: a handler that calls `setState` repaints, which
@@ -5517,6 +5521,7 @@ impl gpui::Render for GpuixView {
                     inherited: Inherited::root(&theme),
                     highlights: &mut self.highlights,
                     paint_reports: &self.paint_reports,
+                    context_menus: &self.context_menus,
                     highlight_events: &mut highlight_events,
                     keyboard_focus,
                 };
@@ -5568,6 +5573,7 @@ impl gpui::Render for GpuixView {
                     },
                 ))
                 .child(crate::automation::bounds_frame_reset())
+                .child(self.context_menus.frame_start(callback.clone()))
                 .child(result)
                 .into_any_element()
         };
@@ -6286,7 +6292,14 @@ pub(crate) fn build_host_container(
         }
     }
 
-    el.into_any_element()
+    let el = el.into_any_element();
+    if element.events().contains("contextMenu")
+        && style.and_then(|style| style.visibility.as_deref()) != Some("hidden")
+    {
+        ctx.context_menus.scope(element.id, el)
+    } else {
+        el
+    }
 }
 
 /// A classic scrollbar's default thickness.

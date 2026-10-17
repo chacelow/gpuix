@@ -417,6 +417,13 @@ export interface HostProps {
   onClick?: (event: EventPayload) => void
   /** Non-primary click, like the DOM `auxclick`. `isRightClick` says which. */
   onAuxClick?: (event: EventPayload) => void
+  /**
+   * Right-button press on the nearest containing div/text scope, including its
+   * interactive descendants. Later occluding layers block it. Does not consume
+   * mouseDown; reports window x/y, button, modifiers and clickCount afterward.
+   * macOS control-click uses GPUI's existing right-button normalization.
+   */
+  onContextMenu?: (event: EventPayload) => void
   onMouseDown?: (event: EventPayload) => void
   onMouseUp?: (event: EventPayload) => void
   onMouseEnter?: (event: EventPayload) => void
