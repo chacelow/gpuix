@@ -95,6 +95,7 @@ export const EVENT_PROPS = [
   ["onMotionComplete", "motionComplete"],
   ["onChange", "change"],
   ["onSubmit", "submit"],
+  ["onResizeEnd", "resizeEnd"],
   ["onClick", "click"],
   ["onAuxClick", "auxClick"],
   ["onContextMenu", "contextMenu"],
@@ -151,6 +152,7 @@ export const UNIVERSAL_PROPS: ReadonlySet<string> = new Set([
   "aria-checked",
   "aria-valuetext",
   "aria-level",
+  "nativeResize",
 ])
 
 export function isReservedProp(name: string): boolean {

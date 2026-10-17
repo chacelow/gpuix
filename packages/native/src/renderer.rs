@@ -27,6 +27,7 @@ use napi::JsDeferred;
 use napi_derive::napi;
 #[cfg(target_os = "macos")]
 use objc::{sel, sel_impl};
+use parking_lot::Mutex as ParkingMutex;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -4762,8 +4763,77 @@ fn appearance_name(appearance: gpui::WindowAppearance) -> &'static str {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct NativeResizeDrag {
+    divider_id: u64,
+    target_id: u64,
+    axis: NativeResizeAxis,
+    property: NativeResizeProperty,
+    sign: f64,
+    min: f64,
+    max: f64,
+    start_position: f64,
+    start_size: f64,
+    last_size: f64,
+}
+
+#[derive(Clone, Copy)]
+enum NativeResizeAxis { X, Y }
+
+#[derive(Clone, Copy)]
+enum NativeResizeProperty { Width, Height }
+
+impl NativeResizeProperty {
+    fn size(self, style: &StyleDesc) -> Option<f64> {
+        let value = match self {
+            Self::Width => style.width.as_ref(),
+            Self::Height => style.height.as_ref(),
+        }?;
+        match value {
+            crate::style::DimensionValue::Pixels(size) => Some(*size),
+            _ => None,
+        }
+    }
+
+    fn set_size(self, style: &mut StyleDesc, size: f64) {
+        let value = Some(crate::style::DimensionValue::Pixels(size));
+        match self {
+            Self::Width => style.width = value,
+            Self::Height => style.height = value,
+        }
+    }
+}
+
+impl NativeResizeDrag {
+    fn position(self, point: gpui::Point<gpui::Pixels>) -> f64 {
+        Self::position_from(self.axis, point)
+    }
+
+    fn position_from(axis: NativeResizeAxis, point: gpui::Point<gpui::Pixels>) -> f64 {
+        match axis {
+            NativeResizeAxis::X => f64::from(f32::from(point.x)),
+            NativeResizeAxis::Y => f64::from(f32::from(point.y)),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct NativeResizeConfig { target: u64, axis: NativeResizeAxis, property: NativeResizeProperty, sign: f64, min: f64, max: f64 }
+
+fn native_resize_config(value: Option<&serde_json::Value>) -> Option<NativeResizeConfig> {
+    let value = value?.as_object()?;
+    let axis = match value.get("axis")?.as_str()? { "x" => NativeResizeAxis::X, "y" => NativeResizeAxis::Y, _ => return None };
+    let property = match value.get("property")?.as_str()? { "width" => NativeResizeProperty::Width, "height" => NativeResizeProperty::Height, _ => return None };
+    let target = value.get("target")?.as_u64()?;
+    let sign = value.get("sign")?.as_f64()?;
+    let min = value.get("min")?.as_f64()?;
+    let max = value.get("max")?.as_f64()?;
+    if !matches!(sign, -1.0 | 1.0) || !min.is_finite() || !max.is_finite() || min > max { return None; }
+    Some(NativeResizeConfig { target, axis, property, sign, min, max })
+}
 pub(crate) struct GpuixView {
     pub(crate) tree: Arc<Mutex<RetainedTree>>,
+
     pub(crate) event_callback: Option<EventCallback>,
     pub(crate) window_title: String,
     pub(crate) window_key_down: bool,
@@ -4809,6 +4879,35 @@ pub(crate) struct GpuixView {
     /// have the listener. Shared with the paint closures that compare against it.
     paint_reports: SharedPaintReports,
     context_menus: crate::context_menu::ContextMenus,
+    native_resize: Arc<ParkingMutex<Option<NativeResizeDrag>>>,
+    native_resize_subscription: Option<gpui::Subscription>,
+}
+
+fn cancel_native_resize(
+    state: &Arc<ParkingMutex<Option<NativeResizeDrag>>>,
+    tree: &Arc<Mutex<RetainedTree>>,
+    callback: &Option<EventCallback>,
+) -> bool {
+    let Some(drag) = state.lock().take() else { return false; };
+    let mut retained = tree.lock().unwrap();
+    let restore = retained.elements.get(&drag.target_id).map(|target| {
+        let mut style = target.style.as_deref().cloned().unwrap_or_default();
+        drag.property.set_size(&mut style, drag.start_size);
+        style
+    });
+    if let Some(style) = restore {
+        if let Ok(bytes) = serde_json::to_vec(&style) {
+            if let Ok(style) = retained.styles.intern(&bytes) {
+                retained.set_style(drag.target_id, style);
+            }
+        }
+    }
+    drop(retained);
+    emit_event_full(callback, drag.divider_id, "resizeEnd", |payload| {
+        payload.size = Some(drag.start_size);
+        payload.cancelled = Some(true);
+    });
+    true
 }
 
 #[derive(Default)]
@@ -4952,6 +5051,7 @@ fn window_key_events(
     key_up: bool,
     event_id: u64,
 ) -> impl gpui::IntoElement {
+
     use gpui::prelude::*;
 
     gpui::canvas(
@@ -5007,6 +5107,32 @@ fn window_key_events(
 /// differs from the last one this element reported. Identity, not count:
 /// swapping a query for a different one with the same number of hits is still a
 /// new result.
+fn native_resize_key_events(
+    state: Arc<ParkingMutex<Option<NativeResizeDrag>>>,
+    tree: Arc<Mutex<RetainedTree>>,
+    callback: Option<EventCallback>,
+) -> impl gpui::IntoElement {
+    use gpui::prelude::*;
+
+    gpui::canvas(
+        |_, _, _| (),
+        move |_, _, window, _| {
+            let state = state.clone();
+            let tree = tree.clone();
+            let callback = callback.clone();
+            window.on_root_key_event::<gpui::KeyDownEvent>(move |event, _phase, window, _cx| {
+                if event.keystroke.key == "escape"
+                    && cancel_native_resize(&state, &tree, &callback)
+                {
+                    window.refresh();
+                }
+            });
+        },
+    )
+    .absolute()
+    .w(gpui::px(0.0))
+    .h(gpui::px(0.0))
+}
 fn resolve_highlight(
     cache: &mut HashMap<u64, HighlightCacheEntry>,
     tree: &RetainedTree,
@@ -5112,6 +5238,8 @@ impl GpuixView {
             highlights: HashMap::new(),
             paint_reports: SharedPaintReports::default(),
             context_menus: crate::context_menu::ContextMenus::default(),
+            native_resize: Arc::new(ParkingMutex::new(None)),
+            native_resize_subscription: None,
         }
     }
 
@@ -5383,6 +5511,8 @@ impl GpuixView {
             context_menus: &self.context_menus,
             highlight_events: &mut highlight_events,
             keyboard_focus,
+            native_resize: self.native_resize.clone(),
+            tree_arc: tree_arc.clone(),
         };
         let child = build_element(expected_child_id, &mut build_ctx, window, cx);
         emit_highlight_events(&callback, &highlight_events);
@@ -5516,6 +5646,8 @@ pub(crate) struct BuildCtx<'a> {
     highlight_events: &'a mut Vec<(u64, usize)>,
     /// See `GpuixView::keyboard_focus_path`.
     pub keyboard_focus: Option<Arc<[u64]>>,
+    pub native_resize: Arc<ParkingMutex<Option<NativeResizeDrag>>>,
+    pub tree_arc: Arc<Mutex<RetainedTree>>,
 }
 
 /// Style properties that cascade into descendants.
@@ -6347,6 +6479,19 @@ impl gpui::Render for GpuixView {
                 });
             }
         }
+        self.native_resize_subscription = Some(cx.observe_window_activation(
+            window,
+            {
+                let state = self.native_resize.clone();
+                let tree = tree_arc.clone();
+                let callback = callback.clone();
+                move |_, window, _cx| {
+                    if !window.is_window_active() && cancel_native_resize(&state, &tree, &callback) {
+                        window.refresh();
+                    }
+                }
+            },
+        ));
         // Build the element tree. custom_registry, focus_handles, and scroll_handles
         // are different fields of self, so Rust allows borrowing all simultaneously.
         let theme = Theme::dark();
@@ -6381,6 +6526,8 @@ impl gpui::Render for GpuixView {
                     context_menus: &self.context_menus,
                     highlight_events: &mut highlight_events,
                     keyboard_focus,
+                    native_resize: self.native_resize.clone(),
+                    tree_arc: tree_arc.clone(),
                 };
                 build_element(root_id, &mut ctx, window, cx)
             }
@@ -6429,13 +6576,16 @@ impl gpui::Render for GpuixView {
                         });
                     },
                 ))
+                .child(native_resize_key_events(
+                    self.native_resize.clone(),
+                    tree_arc.clone(),
+                    callback.clone(),
+                ))
                 .child(crate::automation::bounds_frame_reset())
                 .child(self.context_menus.frame_start(callback.clone()))
                 .child(result)
                 .into_any_element()
         };
-
-        // Sync scroll handles to thread_local so napi methods (scrollTo,
         // getScrollOffset) can access them without an App context.
         SCROLL_HANDLES.with(|cell| {
             let mut handles = cell.borrow_mut();
@@ -7123,6 +7273,69 @@ pub(crate) fn build_host_container(
         }
     }
 
+    if let Some(config) = native_resize_config(element.custom_props().get("nativeResize")) {
+        let resize_state = ctx.native_resize.clone();
+        let tree = ctx.tree_arc.clone();
+        let divider_id = element.id;
+        el = el.capture_pointer()
+            .on_mouse_down(gpui::MouseButton::Left, move |event, _window, _cx| {
+                let retained = tree.lock().unwrap();
+                let Some(target) = retained.elements.get(&config.target) else { return; };
+                let property = config.property;
+                let axis = config.axis;
+                let current = target.style.as_deref().and_then(|style| property.size(style))
+                    .or_else(|| crate::automation::get_bounds(config.target).map(|bounds| match property {
+                        NativeResizeProperty::Width => bounds.width,
+                        NativeResizeProperty::Height => bounds.height,
+                    }));
+                let Some(start_size) = current else { return; };
+                *resize_state.lock() = Some(NativeResizeDrag {
+                    divider_id, target_id: config.target, axis, property, sign: config.sign,
+                    min: config.min, max: config.max, start_position: NativeResizeDrag::position_from(axis, event.position),
+                    start_size, last_size: start_size,
+                });
+            })
+            .on_mouse_move({
+                let resize_state = ctx.native_resize.clone();
+                let tree = ctx.tree_arc.clone();
+                move |event, window, _cx| {
+                    let mut active = resize_state.lock();
+                    let Some(mut drag) = *active else { return; };
+                    if drag.divider_id != divider_id { return; }
+                    let size = (drag.start_size + drag.sign * (drag.position(event.position) - drag.start_position)).clamp(drag.min, drag.max);
+                    if size == drag.last_size { return; }
+                    let mut retained = tree.lock().unwrap();
+                    let Some(mut style) = retained.elements.get(&drag.target_id)
+                        .map(|target| target.style.as_deref().cloned().unwrap_or_default()) else { return; };
+                    drag.property.set_size(&mut style, size);
+                    if let Ok(bytes) = serde_json::to_vec(&style) {
+                        if let Ok(style) = retained.styles.intern(&bytes) {
+                            retained.set_style(drag.target_id, style);
+                        }
+                    }
+                    drag.last_size = size;
+                    *active = Some(drag);
+                    drop(retained);
+                    drop(active);
+                    window.refresh();
+                }
+            })
+            .on_mouse_up(gpui::MouseButton::Left, {
+                let resize_state = ctx.native_resize.clone();
+                let callback = ctx.event_callback.clone();
+                move |_event, _window, _cx| {
+                    let mut active = resize_state.lock();
+                    let drag = active.take().filter(|drag| drag.divider_id == divider_id);
+                    drop(active);
+                    if let Some(drag) = drag {
+                        emit_event_full(&callback, divider_id, "resizeEnd", |payload| {
+                            payload.size = Some(drag.last_size);
+                            payload.cancelled = Some(false);
+                        });
+                    }
+                }
+            });
+    }
     if element.events().contains("mouseDown") && element.events().contains("mouseMove") {
         el = el.capture_pointer();
     }

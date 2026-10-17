@@ -1348,6 +1348,53 @@ mod windows_scale_tests {
         assert_eq!((leave.x, leave.y, leave.hovered), (Some(150.0), Some(160.0), Some(false)));
         renderer.dispose();
     }
+    #[test]
+    fn native_resize_moves_change_retained_size_without_move_events() {
+        let renderer = TestGpuixRenderer::new(Some(400.0), Some(200.0), None).unwrap();
+        renderer.apply_batch(
+            r#"[
+                ["createElement",1,"div"],["createElement",2,"div"],["createElement",3,"div"],["createElement",4,"div"],
+                ["appendChild",1,2],["appendChild",1,3],["appendChild",1,4],
+                ["setStyle",1,{"display":"flex","width":400,"height":200}],
+                ["setStyle",2,{"width":100,"height":200}],
+                ["setStyle",3,{"width":10,"height":200}],
+                ["setStyle",4,{"width":290,"height":200}],
+                ["setCustomProp",3,"nativeResize",{"axis":"x","target":2,"property":"width","sign":1,"min":40,"max":300}],
+                ["setEventListener",3,"resizeEnd",true],["setRoot",1]
+            ]"#.to_string(),
+        ).unwrap();
+        renderer.flush().unwrap();
+        let initial = renderer.get_element_bounds(2.0).unwrap().unwrap().width;
+        renderer.simulate_mouse_down(105.0, 40.0, None, None).unwrap();
+        renderer.simulate_mouse_move(125.0, 40.0, Some(0), None).unwrap();
+        renderer.flush().unwrap();
+        assert_eq!(renderer.get_element_bounds(2.0).unwrap().unwrap().width, initial + 20.0);
+        assert!(renderer.drain_events().is_empty(), "pointer moves must not emit JS events");
+        renderer.simulate_mouse_move(145.0, 40.0, Some(0), None).unwrap();
+        renderer.flush().unwrap();
+        assert_eq!(renderer.get_element_bounds(2.0).unwrap().unwrap().width, initial + 40.0);
+        assert!(renderer.drain_events().is_empty(), "each native move must remain JS-silent");
+        renderer.simulate_mouse_up(145.0, 40.0, None, None).unwrap();
+        let events = renderer.drain_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, "resizeEnd");
+        assert_eq!(events[0].size, Some(initial + 40.0));
+        assert_eq!(events[0].cancelled, Some(false));
+
+        renderer.simulate_mouse_down(145.0, 40.0, None, None).unwrap();
+        renderer.simulate_mouse_move(165.0, 40.0, Some(0), None).unwrap();
+        renderer.flush().unwrap();
+        assert_eq!(renderer.get_element_bounds(2.0).unwrap().unwrap().width, initial + 60.0);
+        renderer.simulate_key_down("escape".to_string(), None).unwrap();
+        renderer.flush().unwrap();
+        assert_eq!(renderer.get_element_bounds(2.0).unwrap().unwrap().width, initial + 40.0);
+        let cancelled = renderer.drain_events();
+        assert_eq!(cancelled.len(), 1);
+        assert_eq!(cancelled[0].event_type, "resizeEnd");
+        assert_eq!(cancelled[0].size, Some(initial + 40.0));
+        assert_eq!(cancelled[0].cancelled, Some(true));
+        renderer.dispose();
+    }
 
     #[test]
     fn real_offscreen_window_preserves_bounds_and_physical_capture_scale() {

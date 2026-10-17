@@ -664,6 +664,10 @@ export interface EventPayload {
    */
   width?: number
   height?: number
+  /** Resized dimension, populated for native resize events. */
+  size?: number
+  /** Whether a native resize ended by cancellation. */
+  cancelled?: boolean
   /**
    * Scroll offset of the element, the pair `getScrollOffset` returns: 0 at the
    * start and negative as the content moves. Populated for: scrollChange.

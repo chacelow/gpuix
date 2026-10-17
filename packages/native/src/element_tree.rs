@@ -117,6 +117,10 @@ pub struct EventPayload {
     /// in window coordinates. Populated for: layout.
     pub width: Option<f64>,
     pub height: Option<f64>,
+    /// Resized dimension, populated for native resize events.
+    pub size: Option<f64>,
+    /// Whether a native resize ended by cancellation.
+    pub cancelled: Option<bool>,
 
     /// Scroll offset of the element, the pair `getScrollOffset` returns: 0 at the
     /// start and negative as the content moves. Populated for: scrollChange.
@@ -167,6 +171,8 @@ impl Default for EventPayload {
             start_index: None,
             end_index: None,
             width: None,
+            size: None,
+            cancelled: None,
             height: None,
             scroll_x: None,
             scroll_y: None,
