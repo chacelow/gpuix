@@ -17,8 +17,8 @@ use gpui::{
     ClipboardItem, Context, CursorStyle, DispatchPhase, ElementInputHandler, Entity,
     EntityInputHandler, FocusHandle, GlobalElementId, KeyBinding, LayoutId, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ScrollWheelEvent,
-    SharedString, Style, Task, TextRun, TextStyle, UTF16Selection, UnderlineStyle, Window,
-    WrappedLine,
+    SharedString, Style, Subscription, Task, TextRun, TextStyle, UTF16Selection, UnderlineStyle,
+    Window, WrappedLine,
 };
 use unicode_segmentation::UnicodeSegmentation;
 use web_time::Instant;
@@ -312,6 +312,7 @@ struct TextEditorElement {
     value: String,
     placeholder: String,
     read_only: bool,
+    select_all_on_focus: bool,
     min_rows: usize,
     max_rows: usize,
     last_prop_value: Option<String>,
@@ -326,6 +327,7 @@ impl TextEditorElement {
             value: String::new(),
             placeholder: String::new(),
             read_only: false,
+            select_all_on_focus: false,
             min_rows: 1,
             max_rows: if multiline { 10 } else { 1 },
             last_prop_value: None,
@@ -339,7 +341,7 @@ impl CustomElement for TextEditorElement {
     fn render(
         &mut self,
         ctx: CustomRenderContext,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<crate::renderer::GpuixView>,
     ) -> gpui::AnyElement {
         let focus_handle = ctx
@@ -359,6 +361,7 @@ impl CustomElement for TextEditorElement {
                 let placeholder = self.placeholder.clone();
                 let multiline = self.multiline;
                 let read_only = self.read_only;
+                let select_all_on_focus = self.select_all_on_focus;
                 let min_rows = self.min_rows;
                 let max_rows = self.max_rows;
                 let caret_color = self.theme.caret;
@@ -366,45 +369,76 @@ impl CustomElement for TextEditorElement {
                 let id = ctx.id;
                 let cursor = value.len();
                 let state_focus_handle = focus_handle.clone();
-                cx.new(move |cx| TextEditorState {
-                    element_id: id,
-                    callback,
-                    emits_change,
-                    emits_submit,
-                    emits_key_down,
-                    emits_key_up,
-                    focus_handle: state_focus_handle,
-                    content: value,
-                    placeholder: placeholder.into(),
-                    multiline,
-                    read_only,
-                    min_rows,
-                    max_rows,
-                    selected_range: cursor..cursor,
-                    selection_reversed: false,
-                    marked_range: None,
-                    is_selecting: false,
-                    drag_position: None,
-                    drag_generation: 0,
-                    drag_autoscroll_active: false,
-                    scroll_top: 0.0,
-                    scroll_left: 0.0,
-                    follow_cursor: true,
-                    last_lines: Vec::new(),
-                    line_starts: vec![0],
-                    last_bounds: None,
-                    line_height: px(20.0),
-                    font_size: px(16.0),
-                    content_height: 20.0,
-                    content_width: 0.0,
-                    display_is_placeholder: false,
-                    caret_color,
-                    blink_anchor: cx.background_executor().now(),
-                    blink_task: None,
-                    pending_values: VecDeque::new(),
-                    undo_stack: VecDeque::new(),
-                    redo_stack: Vec::new(),
-                    last_edit: None,
+                cx.new(move |cx| {
+                    let focus_subscription = cx.on_focus(
+                        &state_focus_handle,
+                        window,
+                        |state: &mut TextEditorState, window, cx| {
+                            let mouse_focus = std::mem::take(&mut state.mouse_focus_pending);
+                            if state.select_all_on_focus
+                                && !mouse_focus
+                                && state.focus_handle.is_focused(window)
+                            {
+                                state.select_all(&SelectAll, window, cx);
+                            }
+                        },
+                    );
+                    let blur_subscription = cx.on_blur(
+                        &state_focus_handle,
+                        window,
+                        |state: &mut TextEditorState, _, _| {
+                            state.mouse_focus_pending = false;
+                        },
+                    );
+                    let mut state = TextEditorState {
+                        element_id: id,
+                        callback,
+                        emits_change,
+                        emits_submit,
+                        emits_key_down,
+                        emits_key_up,
+                        focus_handle: state_focus_handle,
+                        content: value,
+                        placeholder: placeholder.into(),
+                        multiline,
+                        read_only,
+                        select_all_on_focus,
+                        mouse_focus_pending: false,
+                        _focus_subscription: focus_subscription,
+                        _blur_subscription: blur_subscription,
+                        min_rows,
+                        max_rows,
+                        selected_range: cursor..cursor,
+                        selection_reversed: false,
+                        marked_range: None,
+                        is_selecting: false,
+                        drag_position: None,
+                        drag_generation: 0,
+                        drag_autoscroll_active: false,
+                        scroll_top: 0.0,
+                        scroll_left: 0.0,
+                        follow_cursor: true,
+                        last_lines: Vec::new(),
+                        line_starts: vec![0],
+                        last_bounds: None,
+                        line_height: px(20.0),
+                        font_size: px(16.0),
+                        content_height: 20.0,
+                        content_width: 0.0,
+                        display_is_placeholder: false,
+                        caret_color,
+                        blink_anchor: cx.background_executor().now(),
+                        blink_task: None,
+                        pending_values: VecDeque::new(),
+                        undo_stack: VecDeque::new(),
+                        redo_stack: Vec::new(),
+                        last_edit: None,
+                    };
+                    // autoFocus can precede state construction and listener activation.
+                    if state.select_all_on_focus && state.focus_handle.is_focused(window) {
+                        state.select_all(&SelectAll, window, cx);
+                    }
+                    state
                 })
             })
             .clone();
@@ -421,6 +455,7 @@ impl CustomElement for TextEditorElement {
             state.emits_key_up = emits_key_up;
             state.placeholder = self.placeholder.clone().into();
             state.read_only = self.read_only;
+            state.select_all_on_focus = self.select_all_on_focus;
             state.min_rows = self.min_rows.max(1);
             state.max_rows = self.max_rows.max(state.min_rows);
             if state.caret_color != self.theme.caret {
@@ -520,6 +555,7 @@ impl CustomElement for TextEditorElement {
             "value" => self.value = value.as_str().unwrap_or_default().to_string(),
             "placeholder" => self.placeholder = value.as_str().unwrap_or_default().to_string(),
             "readOnly" => self.read_only = value.as_bool().unwrap_or(false),
+            "selectAllOnFocus" => self.select_all_on_focus = value.as_bool().unwrap_or(false),
             "minRows" => self.min_rows = value.as_u64().unwrap_or(1) as usize,
             "maxRows" => {
                 self.max_rows = value
@@ -537,6 +573,7 @@ impl CustomElement for TextEditorElement {
             "value",
             "placeholder",
             "readOnly",
+            "selectAllOnFocus",
             "minRows",
             "maxRows",
             "theme",
@@ -646,6 +683,10 @@ struct TextEditorState {
     placeholder: SharedString,
     multiline: bool,
     read_only: bool,
+    select_all_on_focus: bool,
+    mouse_focus_pending: bool,
+    _focus_subscription: Subscription,
+    _blur_subscription: Subscription,
     min_rows: usize,
     max_rows: usize,
     selected_range: Range<usize>,
@@ -1207,6 +1248,8 @@ impl TextEditorState {
         if !self.read_only {
             window.request_text_input();
         }
+        // Focus notifications arrive after caret placement, possibly after mouse-up.
+        self.mouse_focus_pending = true;
         window.focus(&self.focus_handle, cx);
         let intent = press_intent(event.click_count, event.modifiers.shift);
         self.is_selecting = intent.arms_drag();

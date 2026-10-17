@@ -520,6 +520,8 @@ export interface InputProps extends HostProps {
   value?: string
   placeholder?: string
   readOnly?: boolean
+  /** Select all on keyboard/programmatic focus, not mouse focus. Defaults to false. */
+  selectAllOnFocus?: boolean
   theme?: GpuixTheme
 }
 
