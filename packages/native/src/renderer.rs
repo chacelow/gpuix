@@ -1433,22 +1433,29 @@ async fn run_ui_commands(
                     response.send(appearance_name(window.appearance())).ok();
                 })
             }
+            // Painted boxes are recorded during paint. A clean window's last paint is current, so
+            // answer at once; only a pending draw needs the next frame. Forcing a refresh here made
+            // every pointer-move handler that reads its own bounds redraw the whole window.
             UiCommand::GetAutomationBounds { response } => {
-                window.update(cx, move |_view, window, cx| {
-                    cx.notify();
-                    window.refresh();
-                    window.on_next_frame(move |_window, _cx| {
+                window.update(cx, move |_view, window, _cx| {
+                    if window.is_dirty() {
+                        window.on_next_frame(move |_window, _cx| {
+                            response.send(crate::automation::all_bounds()).ok();
+                        });
+                    } else {
                         response.send(crate::automation::all_bounds()).ok();
-                    });
+                    }
                 })
             }
             UiCommand::GetElementBounds { id, response } => {
-                window.update(cx, move |_view, window, cx| {
-                    cx.notify();
-                    window.refresh();
-                    window.on_next_frame(move |_window, _cx| {
+                window.update(cx, move |_view, window, _cx| {
+                    if window.is_dirty() {
+                        window.on_next_frame(move |_window, _cx| {
+                            response.send(crate::automation::get_bounds(id)).ok();
+                        });
+                    } else {
                         response.send(crate::automation::get_bounds(id)).ok();
-                    });
+                    }
                 })
             }
             UiCommand::FocusElement(id) => window.update(cx, move |view, window, cx| {

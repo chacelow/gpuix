@@ -574,6 +574,16 @@ export interface EventPayload {
   /** Mouse Y position in window coordinates (pixels). */
   y?: number
   /**
+   * Mouse movement since the previous move event in pixels.
+   * Populated for: mouseMove.
+   */
+  movementX?: number
+  /**
+   * Mouse movement since the previous move event in pixels.
+   * Populated for: mouseMove.
+   */
+  movementY?: number
+  /**
    * Which mouse button: 0=left, 1=middle, 2=right.
    * Populated for: mouseDown, mouseUp, click, mouseDownOutside, contextMenu.
    */
@@ -666,6 +676,8 @@ export interface EventPayload {
   height?: number
   /** Resized dimension, populated for native resize events. */
   size?: number
+  /** Pointer delta from the press position, populated for native resize events. */
+  delta?: number
   /** Whether a native resize ended by cancellation. */
   cancelled?: boolean
   /**
