@@ -90,15 +90,14 @@ export declare class GpuixRenderer {
   /** Same numbers as the on-screen overlay: current, p90, p99, max, frames. */
   getDebugFrameOverlayStats(): DebugFrameOverlayStats
   /**
-   * macOS embedded-loop PoC: both AppKit and JavaScript run on this thread.
-   * The handler must return synchronously and must not mutate GPUI reentrantly.
+   * Native close predicate. macOS calls synchronously; Windows first vetoes,
+   * then asks JavaScript nonblockingly and accepts only the matching response.
    */
   setWindowShouldClose(callback: () => boolean): void
   /**
-   * macOS embedded-loop callback, once per requested display frame.
-   * timestampMs is monotonic milliseconds, not wall-clock time.
-   * Return synchronously; do not mutate GPUI reentrantly (defer React updates).
-   * Passing null releases the callback. active=false requests no further frames.
+   * Display-frame callback with a monotonic millisecond timestamp.
+   * macOS calls synchronously; Windows permits one nonblocking JS dispatch.
+   * Passing null releases the callback. active=false cancels queued delivery.
    */
   setAnimationFrameCallback(callback: ((timestampMs: number) => void) | null): void
   /**
@@ -107,12 +106,16 @@ export declare class GpuixRenderer {
    */
   setAnimationFrameActive(active: boolean): void
   /**
-   * Runs synchronously before the first restored frame is painted. Retained
-   * batch setters (applyBatch and setQuads) may update data in this callback;
-   * GPUI reads and window updates cannot reenter the borrowed App context.
-   * Registration samples a baseline rather than emitting an initial resume.
+   * Runs before the first restored presentation. Retained batch setters
+   * (applyBatch and setQuads) may commit the latest data in this callback.
+   * macOS calls synchronously without GPUI reentry; Windows defers presentation
+   * nonblockingly until JavaScript returns. Registration samples a baseline.
    */
   setResumeFrameCallback(callback: ((timestampMs: number) => void) | null): void
+  /** Windows UI-thread persistent cursor hide. Unsupported on other platforms. */
+  hideCursorForDrag(): void
+  /** Windows physical virtual-desktop pixels; unsupported on other platforms. */
+  restoreCursorAfterDrag(x: number, y: number): void
   /**
    * Subscribe to native window activation. The first asynchronous callback
    * reports current state; later callbacks report activation changes.

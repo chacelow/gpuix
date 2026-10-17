@@ -51,6 +51,13 @@ use crate::theme::Theme;
 #[path = "focus_tests.rs"]
 mod focus_tests;
 
+#[cfg(any(test, target_os = "windows"))]
+#[path = "windows_protocol.rs"]
+mod windows_protocol;
+#[cfg(target_os = "windows")]
+#[path = "windows_bridge.rs"]
+mod windows_bridge;
+
 /// The Window menu items act on the focused window, and the root element is the
 /// only place in GPUIX that has one. `crate::app_menu` owns everything else.
 #[cfg(target_os = "macos")]
@@ -1046,6 +1053,26 @@ enum ClockControl {
 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
 enum UiCommand {
     Invalidate,
+    #[cfg(target_os = "windows")]
+    WindowsSetFrameHandler {
+        kind: windows_protocol::FrameKind,
+        generation: u64,
+        handler: Option<windows_bridge::FrameHandler>,
+    },
+    #[cfg(target_os = "windows")]
+    WindowsSetFrameActive,
+    #[cfg(target_os = "windows")]
+    WindowsFrameComplete(windows_protocol::FrameTicket),
+    #[cfg(target_os = "windows")]
+    WindowsSetCloseHandler(windows_bridge::CloseHandler),
+    #[cfg(target_os = "windows")]
+    WindowsCloseComplete { token: windows_protocol::Token, allow: bool },
+    #[cfg(target_os = "windows")]
+    WindowsHideCursor,
+    #[cfg(target_os = "windows")]
+    WindowsRestoreCursor { x: i32, y: i32 },
+    #[cfg(target_os = "windows")]
+    WindowsShutdownBridge,
     ActivateWindow,
     MinimizeWindow,
     CloseWindow,
@@ -1176,6 +1203,41 @@ async fn run_ui_commands(
 ) {
     while let Some(command) = commands.next().await {
         let result = match command {
+            #[cfg(target_os = "windows")]
+            UiCommand::WindowsSetFrameHandler { kind, generation, handler } => {
+                window.update(cx, move |_, window, _| {
+                    windows_bridge::set_frame_handler(kind, handler, generation, window);
+                })
+            }
+            #[cfg(target_os = "windows")]
+            UiCommand::WindowsSetFrameActive => window.update(cx, |_, window, _| {
+                windows_bridge::schedule_animation(window);
+            }),
+            #[cfg(target_os = "windows")]
+            UiCommand::WindowsFrameComplete(ticket) => window.update(cx, |_, window, cx| {
+                windows_bridge::complete_frame(ticket, window, cx);
+            }),
+            #[cfg(target_os = "windows")]
+            UiCommand::WindowsSetCloseHandler(handler) => window.update(cx, |_, _, _| {
+                windows_bridge::set_close_handler(handler);
+            }),
+            #[cfg(target_os = "windows")]
+            UiCommand::WindowsCloseComplete { token, allow } => window.update(cx, |_, window, _| {
+                windows_bridge::complete_close(token, allow, window);
+            }),
+            #[cfg(target_os = "windows")]
+            UiCommand::WindowsHideCursor => window.update(cx, |_, window, _| {
+                windows_bridge::hide_cursor(window);
+            }),
+            #[cfg(target_os = "windows")]
+            UiCommand::WindowsRestoreCursor { x, y } => window.update(cx, |_, _, _| {
+                windows_bridge::restore_cursor(x, y);
+            }),
+            #[cfg(target_os = "windows")]
+            UiCommand::WindowsShutdownBridge => window.update(cx, |_, window, _| {
+                windows_bridge::shutdown(window);
+                window.remove_window();
+            }),
             UiCommand::Invalidate => refresh_ui_window(window, cx),
             UiCommand::ActivateWindow => window.update(cx, |_view, window, cx| {
                 cx.activate(true);
@@ -1184,7 +1246,11 @@ async fn run_ui_commands(
             UiCommand::MinimizeWindow => {
                 window.update(cx, |_view, window, _cx| window.minimize_window())
             }
-            UiCommand::CloseWindow => window.update(cx, |_view, window, _cx| window.remove_window()),
+            UiCommand::CloseWindow => window.update(cx, |_view, window, _cx| {
+                #[cfg(target_os = "windows")]
+                windows_bridge::shutdown(window);
+                window.remove_window();
+            }),
             UiCommand::ZoomWindow => window.update(cx, |_view, window, _cx| window.zoom_window()),
             UiCommand::ToggleFullscreen => {
                 window.update(cx, |_view, window, _cx| window.toggle_fullscreen())
@@ -1595,6 +1661,8 @@ pub struct GpuixRenderer {
     /// so `tick()` cannot pump it; it only observes this flag.
     #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
     ui_running: Arc<AtomicBool>,
+    #[cfg(target_os = "windows")]
+    windows_owner: Arc<windows_bridge::Owner>,
 }
 
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
@@ -1813,12 +1881,16 @@ impl GpuixRenderer {
             ui_commands: Mutex::new(None),
             #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
             ui_running: Arc::new(AtomicBool::new(false)),
+            #[cfg(target_os = "windows")]
+            windows_owner: Arc::new(windows_bridge::Owner::default()),
         }
     }
 
     /// Initialize GPUI using the native event-loop architecture for this OS.
     #[napi]
-    pub fn init(&self, options: Option<WindowOptions>) -> Result<()> {
+    pub fn init(&self, env: Env, options: Option<WindowOptions>) -> Result<()> {
+        #[cfg(not(target_os = "windows"))]
+        let _ = env;
         #[cfg(target_os = "macos")]
         reject_during_resume()?;
         #[cfg(not(any(
@@ -1837,8 +1909,50 @@ impl GpuixRenderer {
         #[cfg(target_os = "macos")]
         return self.init_macos(options);
 
-        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         return self.init_threaded(options);
+
+        #[cfg(target_os = "windows")]
+        {
+            self.init_threaded(options)?;
+            let owner = self.windows_owner.clone();
+            let sender = self.ui_commands.lock().unwrap().as_ref().unwrap().clone();
+            if let Err(error) = env.add_env_cleanup_hook((owner.clone(), sender.clone()), |(owner, sender)| {
+                owner.shutdown();
+                sender.unbounded_send(UiCommand::WindowsShutdownBridge).ok();
+            }) {
+                owner.shutdown();
+                sender.unbounded_send(UiCommand::WindowsShutdownBridge).ok();
+                return Err(error);
+            }
+            Ok(())
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn windows_command_sender(&self) -> Result<mpsc::UnboundedSender<UiCommand>> {
+        self.ui_commands.lock().unwrap().as_ref().cloned()
+            .ok_or_else(|| Error::from_reason("GPUI application is not initialized"))
+    }
+
+    #[cfg(target_os = "windows")]
+    fn set_windows_frame_handler(
+        &self,
+        env: Env,
+        kind: windows_protocol::FrameKind,
+        callback: Either<FunctionRef<f64, ()>, Null>,
+    ) -> Result<()> {
+        let sender = self.windows_command_sender()?;
+        let mut handler = match callback {
+            Either::A(callback) => Some(windows_bridge::frame_handler(
+                &env, callback, self.windows_owner.clone(), sender.clone(),
+            )?),
+            Either::B(_) => None,
+        };
+        let generation = self.windows_owner.frames.lock().replace(kind, handler.is_some());
+        if let Some(handler) = handler.as_mut() { handler.generation = generation; }
+        sender.unbounded_send(UiCommand::WindowsSetFrameHandler { kind, generation, handler })
+            .map_err(|_| Error::from_reason("The GPUI UI thread is not running"))
     }
 
     #[cfg(target_os = "macos")]
@@ -2027,6 +2141,8 @@ impl GpuixRenderer {
         let exit_startup_sender = startup_sender.clone();
         let ui_running = self.ui_running.clone();
         let ui_running_for_run = ui_running.clone();
+        #[cfg(target_os = "windows")]
+        let windows_owner = self.windows_owner.clone();
 
         std::thread::Builder::new()
             .name("gpuix-ui".to_string())
@@ -2055,8 +2171,12 @@ impl GpuixRenderer {
                             };
                             let window = match cx.open_window(
                                 to_gpui_window_options(&window_options, bounds),
-                                |_window, cx| {
-                                    cx.new(|_| GpuixView::new(tree, callback, title, selection))
+                                |window, cx| {
+                                    cx.new(|cx| {
+                                        #[cfg(target_os = "windows")]
+                                        windows_bridge::install(windows_owner, window, cx);
+                                        GpuixView::new(tree, callback, title, selection)
+                                    })
                                 },
                             ) {
                                 Ok(window) => window,
@@ -2070,6 +2190,13 @@ impl GpuixRenderer {
                                     return;
                                 }
                             };
+                            #[cfg(target_os = "windows")]
+                            {
+                                let window_id = window.window_id();
+                                cx.on_window_closed(move |_, closed_id| {
+                                    if closed_id == window_id { windows_bridge::clear(); }
+                                }).detach();
+                            }
 
                             cx.spawn(async move |cx| {
                                 run_ui_commands(command_receiver, window, cx).await;
@@ -2082,6 +2209,8 @@ impl GpuixRenderer {
                             startup_sender.send(Ok(())).ok();
                         });
                 }));
+                #[cfg(target_os = "windows")]
+                windows_bridge::clear();
                 ui_running.store(false, Ordering::Release);
 
                 let error = match result {
@@ -2404,11 +2533,23 @@ impl GpuixRenderer {
         Err(Error::from_reason("Unsupported operating system"))
     }
 
-    /// macOS embedded-loop PoC: both AppKit and JavaScript run on this thread.
-    /// The handler must return synchronously and must not mutate GPUI reentrantly.
-    #[cfg(target_os = "macos")]
+    /// Native close predicate. macOS calls synchronously; Windows first vetoes,
+    /// then asks JavaScript nonblockingly and accepts only the matching response.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     #[napi]
     pub fn set_window_should_close(&self, env: Env, callback: FunctionRef<(), bool>) -> Result<()> {
+        #[cfg(target_os = "windows")]
+        {
+            let sender = self.windows_command_sender()?;
+            let mut handler = windows_bridge::close_handler(
+                &env, callback, self.windows_owner.clone(), sender.clone(),
+            )?;
+            handler.generation = self.windows_owner.close.lock().replace(true);
+            return sender.unbounded_send(UiCommand::WindowsSetCloseHandler(handler))
+                .map_err(|_| Error::from_reason("The GPUI UI thread is not running"));
+        }
+        #[cfg(target_os = "macos")]
+        {
         let handler: Rc<dyn Fn() -> bool> = Rc::new(move || {
             match callback.borrow_back(&env).and_then(|callback| callback.call(())) {
                 Ok(allow) => allow,
@@ -2422,13 +2563,13 @@ impl GpuixRenderer {
             window.on_window_should_close(cx, |_, _| query_window_should_close());
             WINDOW_CLOSE_HANDLER.with(|stored| *stored.borrow_mut() = Some(handler));
         })
+        }
     }
 
-    /// macOS embedded-loop callback, once per requested display frame.
-    /// timestampMs is monotonic milliseconds, not wall-clock time.
-    /// Return synchronously; do not mutate GPUI reentrantly (defer React updates).
-    /// Passing null releases the callback. active=false requests no further frames.
-    #[cfg(target_os = "macos")]
+    /// Display-frame callback with a monotonic millisecond timestamp.
+    /// macOS calls synchronously; Windows permits one nonblocking JS dispatch.
+    /// Passing null releases the callback. active=false cancels queued delivery.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     #[napi]
     pub fn set_animation_frame_callback(
         &self,
@@ -2438,6 +2579,10 @@ impl GpuixRenderer {
             Null,
         >,
     ) -> Result<()> {
+        #[cfg(target_os = "windows")]
+        return self.set_windows_frame_handler(env, windows_protocol::FrameKind::Animation, callback);
+        #[cfg(target_os = "macos")]
+        {
         let handler = match callback {
             Either::A(callback) => Some(Rc::new(move |timestamp_ms| {
                 if let Err(error) = callback
@@ -2454,25 +2599,35 @@ impl GpuixRenderer {
             return Ok(());
         }
         update_window_without_view(|window, _cx| schedule_animation_frame(window))
+        }
     }
 
     /// Enable display-frame callbacks. False stops requesting frames; an already
     /// queued frame drains without calling JavaScript or requesting another frame.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     #[napi]
     pub fn set_animation_frame_active(&self, active: bool) -> Result<()> {
+        #[cfg(target_os = "windows")]
+        {
+            self.windows_command_sender()?;
+            self.windows_owner.frames.lock().set_active(active);
+            return self.send_ui_command(UiCommand::WindowsSetFrameActive);
+        }
+        #[cfg(target_os = "macos")]
+        {
         ANIMATION_FRAME.with(|stored| stored.borrow_mut().active = active);
         if active && !RESUME_FRAME.with(|stored| stored.borrow().dispatching) {
             update_window_without_view(|window, _cx| schedule_animation_frame(window))?;
         }
         Ok(())
+        }
     }
 
-    /// Runs synchronously before the first restored frame is painted. Retained
-    /// batch setters (applyBatch and setQuads) may update data in this callback;
-    /// GPUI reads and window updates cannot reenter the borrowed App context.
-    /// Registration samples a baseline rather than emitting an initial resume.
-    #[cfg(target_os = "macos")]
+    /// Runs before the first restored presentation. Retained batch setters
+    /// (applyBatch and setQuads) may commit the latest data in this callback.
+    /// macOS calls synchronously without GPUI reentry; Windows defers presentation
+    /// nonblockingly until JavaScript returns. Registration samples a baseline.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     #[napi]
     pub fn set_resume_frame_callback(
         &self,
@@ -2482,6 +2637,10 @@ impl GpuixRenderer {
             Null,
         >,
     ) -> Result<()> {
+        #[cfg(target_os = "windows")]
+        return self.set_windows_frame_handler(env, windows_protocol::FrameKind::Resume, callback);
+        #[cfg(target_os = "macos")]
+        {
         if matches!(callback, Either::A(_)) && !RESUME_FRAME.with(|stored| {
             let state = stored.borrow();
             state.dispatching || state.window.is_some()
@@ -2515,6 +2674,35 @@ impl GpuixRenderer {
             return Ok(());
         }
         update_window_without_view(|window, _cx| schedule_resume_frame(window))
+        }
+    }
+
+    /// Windows UI-thread persistent cursor hide. Unsupported on other platforms.
+    #[napi]
+    pub fn hide_cursor_for_drag(&self) -> Result<()> {
+        #[cfg(target_os = "windows")]
+        return self.send_ui_command(UiCommand::WindowsHideCursor);
+        #[cfg(not(target_os = "windows"))]
+        Err(Error::from_reason("Persistent renderer cursor hiding is only supported on Windows"))
+    }
+
+    /// Windows physical virtual-desktop pixels; unsupported on other platforms.
+    #[napi]
+    pub fn restore_cursor_after_drag(&self, x: f64, y: f64) -> Result<()> {
+        #[cfg(target_os = "windows")]
+        {
+            if !x.is_finite() || !y.is_finite()
+                || x.round() < i32::MIN as f64 || x.round() > i32::MAX as f64
+                || y.round() < i32::MIN as f64 || y.round() > i32::MAX as f64 {
+                return Err(Error::from_reason("Cursor coordinates must be finite signed 32-bit physical pixels"));
+            }
+            return self.send_ui_command(UiCommand::WindowsRestoreCursor { x: x.round() as i32, y: y.round() as i32 });
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = (x, y);
+            Err(Error::from_reason("Physical renderer cursor restoration is only supported on Windows"))
+        }
     }
 
     /// Subscribe to native window activation. The first asynchronous callback

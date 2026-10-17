@@ -1300,3 +1300,31 @@ impl TestGpuixRenderer {
         }
     }
 }
+
+#[cfg(all(test, target_os = "windows"))]
+mod windows_scale_tests {
+    use super::*;
+
+    #[test]
+    fn real_offscreen_window_preserves_bounds_and_physical_capture_scale() {
+        for (requested_scale, expected_scale) in [(None, 1.0), (Some(1.0), 1.0), (Some(2.0), 2.0)] {
+            let renderer = TestGpuixRenderer::new(Some(400.0), Some(300.0), requested_scale).unwrap();
+            renderer.flush().unwrap();
+            let dimensions = with_test_state(|cx, window, _| {
+                cx.update_window(window, |_, window, _| {
+                    assert_eq!(window.scale_factor(), expected_scale as f32);
+                    assert_eq!(window.viewport_size(), gpui::size(gpui::px(400.0), gpui::px(300.0)));
+                    assert!(window.bounds().origin.x < gpui::px(0.0));
+                    assert!(window.bounds().origin.y < gpui::px(0.0));
+                    window.refresh();
+                }).map_err(|error| Error::from_reason(error.to_string()))?;
+                cx.run_until_parked();
+                let image = cx.capture_screenshot(window)
+                    .map_err(|error| Error::from_reason(error.to_string()))?;
+                Ok(image.dimensions())
+            }).unwrap();
+            assert_eq!(dimensions, ((400.0 * expected_scale) as u32, (300.0 * expected_scale) as u32));
+            TEST_STATE.with(|state| state.borrow_mut().take());
+        }
+    }
+}

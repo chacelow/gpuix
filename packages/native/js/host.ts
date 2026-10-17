@@ -713,6 +713,8 @@ export type NativeRenderer = MutationHost &
       | "setAnimationFrameCallback"
       | "setAnimationFrameActive"
       | "setResumeFrameCallback"
+      | "hideCursorForDrag"
+      | "restoreCursorAfterDrag"
       | "onWindowActiveChange"
       | "onWindowAppearanceChange"
       | "getWindowAppearance"

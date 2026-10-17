@@ -94,7 +94,8 @@ raw-window-handle = "0.6"
 # Same crate GPUI uses. A .node cannot ship an exe manifest, so Windows DPI
 # awareness is set at runtime in renderer.rs instead of via windows-manifest.
 [target.'cfg(target_os = "windows")'.dependencies]
-windows = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_HiDpi"] }
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_HiDpi", "Win32_UI_WindowsAndMessaging"] }
+raw-window-handle = "0.6"
 
 [features]
 # test-support is default so published binaries include TestGpuixRenderer,
