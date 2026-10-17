@@ -536,6 +536,7 @@ export interface InputProps extends HostProps {
   /** External editor value. Native edits apply immediately and report through onChange. */
   value?: string
   placeholder?: string
+  disabled?: boolean
   readOnly?: boolean
   /** Select all on keyboard/programmatic focus, not mouse focus. Defaults to false. */
   selectAllOnFocus?: boolean

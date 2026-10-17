@@ -5932,6 +5932,9 @@ impl GpuixView {
         {
             let listeners_ready = {
                 let tree = self.tree.lock().unwrap();
+                if tree.elements.get(&id).is_some_and(|element| !element.needs_focus()) {
+                    return;
+                }
                 tree.elements.get(&id).is_some_and(|element| {
                     ["focus", "blur"].into_iter().all(|event| {
                         !element.events().contains(event)
@@ -6161,7 +6164,9 @@ impl GpuixView {
             window.focused(cx).map(|handle| handle.id())
                 != pending.focused_at_request.as_ref().map(|handle| handle.id())
         });
-        if user_moved_focus {
+        if user_moved_focus || self.pending_focus_element.as_ref().is_some_and(|pending| {
+            tree.elements.get(&pending.id).is_some_and(|element| !element.needs_focus())
+        }) {
             self.pending_focus_element = None;
         }
         let mut focus_to_apply = None;
@@ -6212,7 +6217,7 @@ impl GpuixView {
         }
 
         self.focus_subscriptions.retain(|(id, event), _| {
-            tree.elements
+            tree.focusable_ids.contains(id) && tree.elements
                 .get(id)
                 .is_some_and(|element| element.events().contains(*event))
         });

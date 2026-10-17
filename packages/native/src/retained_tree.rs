@@ -83,7 +83,10 @@ impl RetainedElement {
     /// Whether the element must own a gpui focus handle: it takes text, is in the
     /// tab order, or listens for a key or focus event.
     pub fn needs_focus(&self) -> bool {
-        if self.element_type == "quad-batch" {
+        if self.element_type == "quad-batch"
+            || (matches!(self.element_type.as_str(), "input" | "textarea")
+                && self.custom_props().get("disabled").and_then(serde_json::Value::as_bool) == Some(true))
+        {
             return false;
         }
         matches!(self.element_type.as_str(), "input" | "textarea")
@@ -535,7 +538,7 @@ impl RetainedTree {
         let mut changed = false;
         let is_highlight = key == "highlight";
         let is_motion = key == "motion";
-        let is_tab_index = key == "tabIndex";
+        let affects_focus = key == "tabIndex" || key == "disabled";
         let was_declaration = self
             .elements
             .get(&id)
@@ -569,7 +572,7 @@ impl RetainedTree {
         if !changed {
             return;
         }
-        if is_tab_index {
+        if affects_focus {
             self.track_focusable(id);
         }
         if is_motion {
@@ -1142,6 +1145,11 @@ mod tests {
         tree.set_event_listener(3, "keyDown".to_string(), false);
         assert_eq!(focusable(&tree), vec![2, 3, 4]);
         tree.set_event_listener(3, "blur".to_string(), false);
+        assert_eq!(focusable(&tree), vec![2, 4]);
+
+        tree.set_custom_prop(2, "disabled".to_string(), serde_json::json!(true));
+        assert_eq!(focusable(&tree), vec![4]);
+        tree.set_custom_prop(2, "disabled".to_string(), serde_json::json!(false));
         assert_eq!(focusable(&tree), vec![2, 4]);
 
         tree.set_custom_prop(4, "tabIndex".to_string(), serde_json::Value::Null);

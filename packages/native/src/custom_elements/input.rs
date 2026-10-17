@@ -311,6 +311,7 @@ struct TextEditorElement {
     multiline: bool,
     value: String,
     placeholder: String,
+    disabled: bool,
     read_only: bool,
     select_all_on_focus: bool,
     min_rows: usize,
@@ -326,6 +327,7 @@ impl TextEditorElement {
             multiline,
             value: String::new(),
             placeholder: String::new(),
+            disabled: false,
             read_only: false,
             select_all_on_focus: false,
             min_rows: 1,
@@ -347,6 +349,7 @@ impl CustomElement for TextEditorElement {
         let focus_handle = ctx
             .focus_handle
             .cloned()
+            .or_else(|| self.state.as_ref().map(|state| state.read(cx).focus_handle.clone()))
             .unwrap_or_else(|| cx.focus_handle());
         let emits_change = ctx.events.contains("change");
         let emits_submit = ctx.events.contains("submit");
@@ -360,6 +363,7 @@ impl CustomElement for TextEditorElement {
                 let value = self.value.clone();
                 let placeholder = self.placeholder.clone();
                 let multiline = self.multiline;
+                let disabled = self.disabled;
                 let read_only = self.read_only;
                 let select_all_on_focus = self.select_all_on_focus;
                 let min_rows = self.min_rows;
@@ -369,27 +373,8 @@ impl CustomElement for TextEditorElement {
                 let id = ctx.id;
                 let cursor = value.len();
                 let state_focus_handle = focus_handle.clone();
+                let window = &mut *window;
                 cx.new(move |cx| {
-                    let focus_subscription = cx.on_focus(
-                        &state_focus_handle,
-                        window,
-                        |state: &mut TextEditorState, window, cx| {
-                            let mouse_focus = std::mem::take(&mut state.mouse_focus_pending);
-                            if state.select_all_on_focus
-                                && !mouse_focus
-                                && state.focus_handle.is_focused(window)
-                            {
-                                state.select_all(&SelectAll, window, cx);
-                            }
-                        },
-                    );
-                    let blur_subscription = cx.on_blur(
-                        &state_focus_handle,
-                        window,
-                        |state: &mut TextEditorState, _, _| {
-                            state.mouse_focus_pending = false;
-                        },
-                    );
                     let mut state = TextEditorState {
                         element_id: id,
                         callback,
@@ -401,11 +386,12 @@ impl CustomElement for TextEditorElement {
                         content: value,
                         placeholder: placeholder.into(),
                         multiline,
+                        disabled,
                         read_only,
                         select_all_on_focus,
                         mouse_focus_pending: false,
-                        _focus_subscription: focus_subscription,
-                        _blur_subscription: blur_subscription,
+                        _focus_subscription: None,
+                        _blur_subscription: None,
                         min_rows,
                         max_rows,
                         selected_range: cursor..cursor,
@@ -434,6 +420,9 @@ impl CustomElement for TextEditorElement {
                         redo_stack: Vec::new(),
                         last_edit: None,
                     };
+                    if !disabled {
+                        state.bind_focus(window, cx);
+                    }
                     // autoFocus can precede state construction and listener activation.
                     if state.select_all_on_focus && state.focus_handle.is_focused(window) {
                         state.select_all(&SelectAll, window, cx);
@@ -454,7 +443,26 @@ impl CustomElement for TextEditorElement {
             state.emits_key_down = emits_key_down;
             state.emits_key_up = emits_key_up;
             state.placeholder = self.placeholder.clone().into();
-            state.read_only = self.read_only;
+            if state.disabled != self.disabled || state.read_only != self.read_only {
+                state.disabled = self.disabled;
+                state.read_only = self.read_only;
+                cx.notify();
+            }
+            if self.disabled {
+                if state.focus_handle.is_focused(window) {
+                    window.blur();
+                }
+                state._focus_subscription = None;
+                state._blur_subscription = None;
+                state.blink_task = None;
+                state.is_selecting = false;
+                state.drag_position = None;
+                state.drag_generation = state.drag_generation.wrapping_add(1);
+                state.drag_autoscroll_active = false;
+            } else if state.focus_handle.id() != focus_handle.id() {
+                state.focus_handle = focus_handle.clone();
+                state.bind_focus(window, cx);
+            }
             state.select_all_on_focus = self.select_all_on_focus;
             state.min_rows = self.min_rows.max(1);
             state.max_rows = self.max_rows.max(state.min_rows);
@@ -474,7 +482,7 @@ impl CustomElement for TextEditorElement {
             .flex()
             .min_w_0()
             .w_full()
-            .track_focus(&focus_handle)
+            .when(!self.disabled, |editor| editor.track_focus(&focus_handle))
             .child(state);
         // Single-line inputs center text vertically when given extra height.
         if !self.multiline {
@@ -554,6 +562,7 @@ impl CustomElement for TextEditorElement {
         match key {
             "value" => self.value = value.as_str().unwrap_or_default().to_string(),
             "placeholder" => self.placeholder = value.as_str().unwrap_or_default().to_string(),
+            "disabled" => self.disabled = value.as_bool().unwrap_or(false),
             "readOnly" => self.read_only = value.as_bool().unwrap_or(false),
             "selectAllOnFocus" => self.select_all_on_focus = value.as_bool().unwrap_or(false),
             "minRows" => self.min_rows = value.as_u64().unwrap_or(1) as usize,
@@ -572,6 +581,7 @@ impl CustomElement for TextEditorElement {
         &[
             "value",
             "placeholder",
+            "disabled",
             "readOnly",
             "selectAllOnFocus",
             "minRows",
@@ -682,11 +692,12 @@ struct TextEditorState {
     content: String,
     placeholder: SharedString,
     multiline: bool,
+    disabled: bool,
     read_only: bool,
     select_all_on_focus: bool,
     mouse_focus_pending: bool,
-    _focus_subscription: Subscription,
-    _blur_subscription: Subscription,
+    _focus_subscription: Option<Subscription>,
+    _blur_subscription: Option<Subscription>,
     min_rows: usize,
     max_rows: usize,
     selected_range: Range<usize>,
@@ -717,12 +728,44 @@ struct TextEditorState {
 }
 
 impl TextEditorState {
+    fn bind_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self._focus_subscription = Some(cx.on_focus(
+            &self.focus_handle,
+            window,
+            |state, window, cx| {
+                let mouse_focus = std::mem::take(&mut state.mouse_focus_pending);
+                if !state.disabled && state.select_all_on_focus && !mouse_focus && state.focus_handle.is_focused(window) {
+                    state.select_all(&SelectAll, window, cx);
+                }
+            },
+        ));
+        self._blur_subscription = Some(cx.on_blur(
+            &self.focus_handle,
+            window,
+            |state, _, _| state.mouse_focus_pending = false,
+        ));
+    }
+
+    fn cursor_style(&self) -> CursorStyle {
+        if self.disabled {
+            CursorStyle::OperationNotAllowed
+        } else if self.read_only {
+            CursorStyle::Arrow
+        } else {
+            CursorStyle::IBeam
+        }
+    }
+
     fn reset_blink(&mut self, cx: &Context<Self>) {
         self.blink_anchor = cx.background_executor().now();
     }
 
     fn caret_shown(&mut self, window: &Window, cx: &mut Context<Self>) -> bool {
-        if !self.focus_handle.is_focused(window) || !window.is_window_active() {
+        if self.disabled
+            || self.read_only
+            || !self.focus_handle.is_focused(window)
+            || !window.is_window_active()
+        {
             self.blink_task = None;
             return false;
         }
@@ -1245,6 +1288,9 @@ impl TextEditorState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.disabled {
+            return;
+        }
         if !self.read_only {
             window.request_text_input();
         }
@@ -1573,7 +1619,7 @@ impl EntityInputHandler for TextEditorState {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.read_only {
+        if self.disabled || self.read_only {
             return;
         }
         let range = range_utf16
@@ -1609,7 +1655,7 @@ impl EntityInputHandler for TextEditorState {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.read_only {
+        if self.disabled || self.read_only {
             return;
         }
         let range = range_utf16
@@ -1690,7 +1736,7 @@ impl EntityInputHandler for TextEditorState {
     }
 
     fn accepts_text_input(&self, _: &mut Window, _: &mut Context<Self>) -> bool {
-        !self.read_only
+        !self.disabled && !self.read_only
     }
 }
 
@@ -1707,8 +1753,8 @@ impl gpui::Render for TextEditorState {
             } else {
                 TEXTAREA_KEY_CONTEXT
             })
-            .track_focus(&self.focus_handle)
-            .cursor(CursorStyle::IBeam)
+            .when(!self.disabled, |editor| editor.track_focus(&self.focus_handle))
+            .cursor(self.cursor_style())
             .on_action(cx.listener(Self::backspace))
             .on_action(cx.listener(Self::delete))
             .on_action(cx.listener(Self::left))
@@ -1845,6 +1891,9 @@ impl gpui::Element for EditorTextElement {
         );
         let mut selection = Vec::new();
         let mut caret = None;
+        if input.disabled {
+            return EditorPrepaint { caret, selection };
+        }
         if input.selected_range.is_empty() || input.display_is_placeholder {
             let caret_point = input
                 .point_for_index(input.cursor_offset())
@@ -1908,12 +1957,14 @@ impl gpui::Element for EditorTextElement {
         window: &mut Window,
         cx: &mut App,
     ) {
-        let focus_handle = self.input.read(cx).focus_handle.clone();
-        window.handle_input(
-            &focus_handle,
-            ElementInputHandler::new(bounds, self.input.clone()),
-            cx,
-        );
+        if !self.input.read(cx).disabled {
+            let focus_handle = self.input.read(cx).focus_handle.clone();
+            window.handle_input(
+                &focus_handle,
+                ElementInputHandler::new(bounds, self.input.clone()),
+                cx,
+            );
+        }
         let input = self.input.clone();
         window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
             if phase == DispatchPhase::Bubble && event.pressed_button == Some(MouseButton::Left) {
@@ -1978,6 +2029,137 @@ impl gpui::IntoElement for EditorTextElement {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn input_disabled_and_read_only_reject_edits_without_carets(cx: &mut gpui::TestAppContext) {
+        use std::sync::{Arc, Mutex};
+
+        let window = cx.add_window(|window, _| {
+            window.activate_window();
+            crate::renderer::GpuixView::new(
+                Arc::new(Mutex::new(crate::retained_tree::RetainedTree::new())),
+                None,
+                "input modes".into(),
+                crate::text::SharedSelection::default(),
+            )
+        });
+        cx.run_until_parked();
+        let view = window.update(cx, |_, _, cx| cx.entity()).unwrap();
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        for disabled in [false, true] {
+            visual.draw(point(px(0.0), px(0.0)), size(px(320.0), px(20.0)), |window, app| {
+                view.update(app, |_, cx| {
+                    let mut element = TextEditorElement::new(false);
+                    element.set_prop("value", serde_json::json!("fixed"));
+                    element.set_prop(
+                        if disabled { "disabled" } else { "readOnly" },
+                        serde_json::json!(true),
+                    );
+                    let focus = cx.focus_handle();
+                    let rendered = element.render(CustomRenderContext {
+                        id: 2,
+                        events: &Default::default(),
+                        event_callback: &None,
+                        focus_handle: Some(&focus),
+                        keyboard_focus: None,
+                        style: None,
+                        children: Vec::new(),
+                        selection: crate::text::SharedSelection::default(),
+                        selectable: true,
+                        selection_wash: gpui::rgba(0x7c86ff59).into(),
+                        highlight_set: None,
+                        props: &Default::default(),
+                    }, window, cx);
+                    element.state.as_ref().unwrap().update(cx, |state, cx| {
+                        focus.focus(window, cx);
+                        assert!(focus.is_focused(window));
+                        assert!(window.is_window_active());
+                        assert!(!state.caret_shown(window, cx));
+                        assert!(state.blink_task.is_none());
+                        assert_eq!(state.cursor_style(), if disabled {
+                            CursorStyle::OperationNotAllowed
+                        } else {
+                            CursorStyle::Arrow
+                        });
+                        assert!(!state.accepts_text_input(window, cx));
+                        state.on_mouse_down(
+                            &MouseDownEvent { click_count: 3, ..Default::default() },
+                            window, cx,
+                        );
+                        assert_eq!(state.selected_range, if disabled { 5..5 } else { 0..5 });
+                        if !disabled {
+                            state.copy(&Copy, window, cx);
+                            assert_eq!(
+                                cx.read_from_clipboard().and_then(clipboard_text).as_deref(),
+                                Some("fixed"),
+                            );
+                        }
+                        state.replace_text_in_range(None, "changed", window, cx);
+                        state.replace_and_mark_text_in_range(None, "marked", None, window, cx);
+                        assert_eq!(state.content, "fixed");
+                        assert!(state.marked_range.is_none());
+                        assert!(state.undo_stack.is_empty());
+                    });
+                    rendered
+                })
+            });
+        }
+        drop(view);
+        drop(visual);
+        cx.run_until_parked();
+    }
+
+    #[test]
+    fn input_disabled_refuses_focus_even_with_tab_index_and_focus_listeners() {
+        let mut tree = crate::retained_tree::RetainedTree::new();
+        tree.create_element(2, "input".into());
+        tree.set_custom_prop(2, "disabled".into(), serde_json::json!(true));
+        tree.set_custom_prop(2, "tabIndex".into(), serde_json::json!(0));
+        for event in ["focus", "blur", "keyDown", "keyUp"] {
+            tree.set_event_listener(2, event.into(), true);
+        }
+        assert!(!tree.elements[&2].needs_focus());
+        assert!(!tree.focusable_ids.contains(&2));
+        tree.set_custom_prop(2, "disabled".into(), serde_json::Value::Null);
+        assert!(tree.focusable_ids.contains(&2));
+    }
+
+    #[gpui::test]
+    fn input_disabled_is_absent_from_native_focus_and_tab_navigation(cx: &mut gpui::TestAppContext) {
+        use std::sync::{Arc, Mutex};
+
+        let mut tree = crate::retained_tree::RetainedTree::new();
+        tree.create_element(1, "div".into());
+        tree.set_root(1);
+        for id in [2, 3] {
+            tree.create_element(id, "input".into());
+            tree.set_custom_prop(id, "autoFocus".into(), serde_json::json!(true));
+            tree.set_custom_prop(id, "tabIndex".into(), serde_json::json!(0));
+            tree.append_child(1, id);
+        }
+        tree.set_custom_prop(2, "disabled".into(), serde_json::json!(true));
+        let window = cx.add_window(move |window, _| {
+            window.activate_window();
+            crate::renderer::GpuixView::new(
+                Arc::new(Mutex::new(tree)),
+                None,
+                "disabled focus".into(),
+                crate::text::SharedSelection::default(),
+            )
+        });
+        cx.run_until_parked();
+        window.update(cx, |view, window, cx| {
+            assert!(!view.focus_handles.contains_key(&2));
+            assert!(view.focus_handles[&3].is_focused(window));
+            view.request_focus(2, window, cx);
+        }).unwrap();
+        cx.run_until_parked();
+        window.update(cx, |view, window, cx| {
+            assert!(view.focus_handles[&3].is_focused(window));
+            window.focus_next(cx);
+            assert!(view.focus_handles[&3].is_focused(window));
+        }).unwrap();
+    }
 
     fn has_binding(bindings: &[KeyBinding], keystroke: &str, action: &dyn gpui::Action) -> bool {
         let keystroke = gpui::Keystroke::parse(keystroke).unwrap();
