@@ -279,6 +279,7 @@ export declare class GpuixRenderer {
  */
 export declare class TestGpuixRenderer {
   constructor(width?: number | undefined | null, height?: number | undefined | null, scaleFactor?: number | undefined | null)
+  dispose(): void
   /**
    * How many elements the retained tree holds, reachable from the root or
    * not. `getTreeJson` walks from the root, so it cannot see a node that was

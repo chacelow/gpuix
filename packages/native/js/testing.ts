@@ -36,6 +36,7 @@ interface NativeTestRendererApi extends NativeRenderer {
   promptForPaths(options?: PathPromptOptions): Promise<string[] | null>
   setQuads(elementId: number, quads: Float32Array): void
   flush(): void
+  dispose(): void
   drainEvents(): EventPayload[]
   simulateKeystrokes(keystrokes: string): void
   focusElement(elementId: number): void
@@ -178,6 +179,7 @@ export class TestRenderer implements NativeRenderer {
   /** Native TestGpuixRenderer — all state lives here in Rust's RetainedTree. */
   private native: NativeTestRendererApi
   readonly applyBatch: NativeRenderer["applyBatch"]
+  readonly dispose: () => void
   readonly setQuads: NonNullable<NativeRenderer["setQuads"]>
   readonly focusNext: () => void
   readonly focusPrevious: () => void
@@ -196,6 +198,7 @@ export class TestRenderer implements NativeRenderer {
     }
     this.native = new NativeTestRenderer(options.width, options.height, options.scaleFactor)
     this.applyBatch = this.native.applyBatch.bind(this.native)
+    this.dispose = this.native.dispose.bind(this.native)
     this.setQuads = this.native.setQuads.bind(this.native)
     this.focusNext = this.native.focusNext.bind(this.native)
     this.focusPrevious = this.native.focusPrevious.bind(this.native)

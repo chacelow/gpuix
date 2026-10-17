@@ -38,6 +38,7 @@ struct VisualTestState {
     view: gpui::Entity<GpuixView>,
     window: gpui::AnyWindowHandle,
     cx: gpui::VisualTestAppContext,
+    owner: std::sync::Weak<Mutex<RetainedTree>>,
 }
 
 /// Release every `Entity` handle the view is holding, while the `App` is alive.
@@ -75,6 +76,10 @@ impl Drop for VisualTestState {
         // is trying to reach.
         self.cx
             .update_window(self.window, |_, window, _| window.refresh())
+            .ok();
+        self.cx.run_until_parked();
+        self.cx
+            .update_window(self.window, |_, window, _| window.remove_window())
             .ok();
         self.cx.run_until_parked();
     }
@@ -209,6 +214,14 @@ pub struct TestGpuixRenderer {
     selection: crate::text::SharedSelection,
 }
 
+impl TestGpuixRenderer {
+    fn owns_test_window(&self) -> bool {
+        TEST_STATE.with(|state| state.borrow().as_ref().is_some_and(|state| {
+            std::ptr::eq(state.owner.as_ptr(), Arc::as_ptr(&self.tree))
+        }))
+    }
+}
+
 #[napi]
 impl TestGpuixRenderer {
     #[napi(constructor)]
@@ -278,7 +291,7 @@ impl TestGpuixRenderer {
 
         // Store !Send types on the JS main thread.
         TEST_STATE.with(|cell| {
-            *cell.borrow_mut() = Some(VisualTestState { cx, window, view });
+            *cell.borrow_mut() = Some(VisualTestState { cx, window, view, owner: Arc::downgrade(&tree) });
         });
 
         Ok(Self {
@@ -286,6 +299,13 @@ impl TestGpuixRenderer {
             events,
             selection,
         })
+    }
+
+    #[napi]
+    pub fn dispose(&self) {
+        if self.owns_test_window() {
+            TEST_STATE.with(|state| { state.borrow_mut().take(); });
+        }
     }
 
     /// How many elements the retained tree holds, reachable from the root or
@@ -595,6 +615,9 @@ impl TestGpuixRenderer {
     #[napi]
     pub fn set_window_key_events(&self, key_down: bool, key_up: bool, event_id: f64) -> Result<()> {
         let event_id = to_element_id(event_id)?;
+        if !key_down && !key_up && !self.owns_test_window() {
+            return Ok(());
+        }
         with_test_state(|cx, window, view| {
             let view = view.clone();
             cx.update_window(window, |_, window, app| {
@@ -615,6 +638,9 @@ impl TestGpuixRenderer {
     #[napi]
     pub fn set_window_selection_change(&self, enabled: bool, event_id: f64) -> Result<()> {
         let event_id = to_element_id(event_id)?;
+        if !enabled && !self.owns_test_window() {
+            return Ok(());
+        }
         with_test_state(|cx, window, view| {
             let view = view.clone();
             cx.update_window(window, |_, window, app| {
@@ -1324,7 +1350,7 @@ mod windows_scale_tests {
                 Ok(image.dimensions())
             }).unwrap();
             assert_eq!(dimensions, ((400.0 * expected_scale) as u32, (300.0 * expected_scale) as u32));
-            TEST_STATE.with(|state| state.borrow_mut().take());
+            renderer.dispose();
         }
     }
 }
