@@ -54,12 +54,22 @@ fn with_window_menu_actions(root: gpui::Div) -> gpui::Div {
 
     root.on_action(|_: &MinimizeWindow, window, _cx| window.minimize_window())
         .on_action(|_: &ZoomWindow, window, _cx| window.zoom_window())
-        .on_action(|_: &CloseWindow, window, _cx| window.remove_window())
+        .on_action(|_: &CloseWindow, window, _cx| {
+            if query_window_should_close() {
+                window.remove_window();
+            }
+        })
 }
 
 #[cfg(not(target_os = "macos"))]
 fn with_window_menu_actions(root: gpui::Div) -> gpui::Div {
     root
+}
+
+#[cfg(target_os = "macos")]
+fn query_window_should_close() -> bool {
+    let handler = WINDOW_CLOSE_HANDLER.with(|stored| stored.borrow().clone());
+    handler.map(|handler| handler()).unwrap_or(true)
 }
 
 /// Parse a CSS font-weight value (string or number) into a GPUI FontWeight.
@@ -128,6 +138,8 @@ thread_local! {
     static GPUI_APP: RefCell<Option<gpui::ApplicationHandle>> = const { RefCell::new(None) };
     #[cfg(target_os = "macos")]
     static GPUI_WINDOW: RefCell<Option<gpui::WindowHandle<GpuixView>>> = const { RefCell::new(None) };
+    #[cfg(target_os = "macos")]
+    static WINDOW_CLOSE_HANDLER: RefCell<Option<Rc<dyn Fn() -> bool>>> = const { RefCell::new(None) };
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     static WEB_APP: RefCell<Option<gpui::ApplicationHandle>> = const { RefCell::new(None) };
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
@@ -1662,6 +1674,26 @@ impl GpuixRenderer {
             target_os = "freebsd"
         )))]
         Err(Error::from_reason("Unsupported operating system"))
+    }
+
+    /// macOS embedded-loop PoC: both AppKit and JavaScript run on this thread.
+    /// The handler must return synchronously and must not mutate GPUI reentrantly.
+    #[cfg(target_os = "macos")]
+    #[napi]
+    pub fn set_window_should_close(&self, env: Env, callback: FunctionRef<(), bool>) -> Result<()> {
+        let handler: Rc<dyn Fn() -> bool> = Rc::new(move || {
+            match callback.borrow_back(&env).and_then(|callback| callback.call(())) {
+                Ok(allow) => allow,
+                Err(error) => {
+                    log::error!("Window close callback failed: {error}");
+                    false
+                }
+            }
+        });
+        update_window_without_view(move |window, cx| {
+            window.on_window_should_close(cx, |_, _| query_window_should_close());
+            WINDOW_CLOSE_HANDLER.with(|stored| *stored.borrow_mut() = Some(handler));
+        })
     }
 
     /// Bring the window forward and give it focus. This is how a window opened

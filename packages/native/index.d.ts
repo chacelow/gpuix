@@ -88,6 +88,11 @@ export declare class GpuixRenderer {
   /** Same numbers as the on-screen overlay: current, p90, p99, max, frames. */
   getDebugFrameOverlayStats(): DebugFrameOverlayStats
   /**
+   * macOS embedded-loop PoC: both AppKit and JavaScript run on this thread.
+   * The handler must return synchronously and must not mutate GPUI reentrantly.
+   */
+  setWindowShouldClose(callback: () => boolean): void
+  /**
    * Bring the window forward and give it focus. This is how a window opened
    * with `show: false` or `focus: false` is revealed later.
    */
